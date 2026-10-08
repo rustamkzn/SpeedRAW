@@ -299,64 +299,68 @@ enum XMP {
         url.deletingPathExtension().appendingPathExtension("xmp")
     }
 
+    static func readAttribute(_ name: String, from text: String) -> String? {
+        let pattern = NSRegularExpression.escapedPattern(for: name) + #"="([^"]*)""#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range(at: 1), in: text) else { return nil }
+        return String(text[range])
+    }
+
     static func rating(for url: URL) -> Int {
-        let x = sidecar(url)
-        guard let s = try? String(contentsOf: x, encoding: .utf8) else { return 0 }
-        let pattern = #"xmp:Rating="(\d+)""#
-        if let r = s.range(of: pattern, options: .regularExpression),
-           let value = Int(s[r].split(separator: """).dropFirst().first ?? "") { return value }
-        return 0
+        guard let text = try? String(contentsOf: sidecar(url), encoding: .utf8),
+              let value = readAttribute("xmp:Rating", from: text),
+              let rating = Int(value) else { return 0 }
+        return max(0, min(5, rating))
     }
 
     static func label(for url: URL) -> String {
-        let x = sidecar(url)
-        guard let s = try? String(contentsOf: x, encoding: .utf8) else { return "" }
-        let pattern = #"xmp:Label="([^"]*)""#
-        if let r = s.range(of: pattern, options: .regularExpression) {
-            let part = String(s[r])
-            return part.replacingOccurrences(of: #"xmp:Label=""#, with: "").dropLast() .description
-        }
-        return ""
+        guard let text = try? String(contentsOf: sidecar(url), encoding: .utf8) else { return "" }
+        return readAttribute("xmp:Label", from: text) ?? ""
     }
 
     static func write(rating: Int, label: String, for url: URL) {
         let x = sidecar(url)
-        let escapedLabel = label.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: """, with: "&quot;")
+        let safeRating = max(0, min(5, rating))
+        let safeLabel = label.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: """, with: "&quot;")
         let existing = (try? String(contentsOf: x, encoding: .utf8)) ?? ""
-        var text = existing
+        let output: String
 
-        if text.isEmpty {
-            text = """
+        if existing.isEmpty {
+            output = """
             <?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
             <x:xmpmeta xmlns:x="adobe:ns:meta/">
             <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-            <rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="\(rating)" xmp:Label="\(escapedLabel)"/>
+            <rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="\(safeRating)" xmp:Label="\(safeLabel)"/>
             </rdf:RDF>
             </x:xmpmeta>
             <?xpacket end="w"?>
             """
         } else {
-            text = replaceAttribute(text, name: "xmp:Rating", value: String(rating))
-            text = replaceAttribute(text, name: "xmp:Label", value: escapedLabel)
+            var text = existing
+            text = setAttribute("xmp:Rating", value: String(safeRating), in: text)
+            text = setAttribute("xmp:Label", value: safeLabel, in: text)
+            output = text
         }
 
-        try? text.write(to: x, atomically: true, encoding: .utf8)
+        try? output.write(to: x, atomically: true, encoding: .utf8)
     }
 
-    private static func replaceAttribute(_ text: String, name: String, value: String) -> String {
-        let escaped = value
-        let pattern = name + #"="[^"]*""#
-        if let range = text.range(of: pattern, options: .regularExpression) {
-            return text.replacingCharacters(in: range, with: name + "=\"" + escaped + "\"")
+    static func setAttribute(_ name: String, value: String, in text: String) -> String {
+        let escapedName = NSRegularExpression.escapedPattern(for: name)
+        let pattern = escapedName + #"="[^"]*""#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range, in: text) else {
+            guard let desc = text.range(of: "<rdf:Description"),
+                  let end = text[desc.lowerBound...].firstIndex(of: ">") else { return text }
+            var copy = text
+            copy.insert(contentsOf: " \(name)=\"\(value)\"", at: end)
+            return copy
         }
-        if let desc = text.range(of: "<rdf:Description") {
-            if let end = text[desc.lowerBound...].firstIndex(of: ">") {
-                let insertion = " (name)=\"\(escaped)\""
-                var copy = text
-                copy.insert(contentsOf: insertion, at: end)
-                return copy
-            }
-        }
-        return text
+        var copy = text
+        copy.replaceSubrange(range, with: "\(name)=\"\(value)\"")
+        return copy
     }
 }
