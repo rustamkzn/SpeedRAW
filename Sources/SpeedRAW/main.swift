@@ -470,7 +470,7 @@ struct ContentView: View {
 
     private func bottomBar(lib: Library) -> some View {
         let percentText = String(format: "%.1f", lib.selectedPercent)
-        HStack(spacing: 12) {
+        return HStack(spacing: 12) {
             Text("Рейтинги: \\(lib.selectedCount) из \\(lib.items.count) • \\(percentText)%")
                 .font(.caption.bold())
             if let c = lib.current {
