@@ -311,6 +311,8 @@ struct ContentView: View {
                                 ZoomablePreview(url: item.url, zoom: $lib.zoom)
                             }
                         }
+                        .overlay(RoundedRectangle(cornerRadius: 0)
+                            .stroke(lib.selectedIDs.contains(item.id) ? Color.yellow : Color.clear, lineWidth: 4))
                         .overlay(alignment: .topTrailing) {
                             PeopleBadge(count: item.peopleCount).padding(10)
                         }
@@ -392,25 +394,6 @@ struct ContentView: View {
     }
 }
 
-struct ImageView: View {
-    let url: URL
-    var body: some View {
-        if let image = NSImage(contentsOf: url) {
-            Image(nsImage: image)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-        } else {
-            VStack {
-                Image(systemName: "photo")
-                    .font(.system(size: 60))
-                Text("Не удалось открыть превью")
-            }
-            .foregroundStyle(.white.opacity(0.7))
-        }
-    }
-}
-
-struct CompareView: View { @ObservedObject var lib: Library; var body: some View { HStack(spacing:2) { ForEach(lib.compareItems) { item in ImageView(url:item.url).frame(maxWidth:.infinity,maxHeight:.infinity).background(.black) } }.background(.black) } }
 struct CompareView: View {
     @ObservedObject var lib: Library
     var body: some View {
@@ -480,6 +463,229 @@ final class ZoomNSView: NSView {
         zoom = min(8, max(1, zoom * factor))
         onZoom?(zoom)
         needsDisplay = true
+    }
+}
+
+struct FolderNode: Identifiable {
+    let id = UUID()
+    let url: URL
+    let children: [FolderNode]
+}
+
+struct FolderRow: View {
+    let node: FolderNode
+    let depth: Int
+    let action: (URL) -> Void
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 5) {
+                if !node.children.isEmpty {
+                    Button { expanded.toggle() } label: {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right").frame(width: 12)
+                    }.buttonStyle(.plain)
+                } else {
+                    Spacer().frame(width: 12)
+                }
+                Image(systemName: node.url.path == "/" ? "internaldrive" : "folder")
+                Text(node.url.lastPathComponent.isEmpty ? node.url.path : node.url.lastPathComponent)
+                    .lineLimit(1)
+            }
+            .padding(.leading, CGFloat(depth * 14))
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+            .onTapGesture { action(node.url) }
+
+            if expanded {
+                ForEach(node.children) { child in
+                    FolderRow(node: child, depth: depth + 1, action: action)
+                }
+            }
+        }
+    }
+}
+
+struct MetadataPanel: View {
+    let item: PhotoItem
+    static let df: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "dd.MM.yyyy HH:mm:ss"
+        return f
+    }()
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("ДАННЫЕ КАДРА").font(.caption.bold()).foregroundStyle(.secondary)
+            MetaLine(icon: "camera", title: "Камера", value: item.camera)
+            MetaLine(icon: "camera.aperture", title: "Объектив", value: item.lens)
+            MetaLine(icon: "circle.dashed", title: "Диафрагма", value: item.aperture)
+            MetaLine(icon: "timer", title: "Выдержка", value: item.shutter)
+            MetaLine(icon: "speedometer", title: "ISO", value: item.iso)
+            MetaLine(icon: "bolt.fill", title: "Вспышка", value: item.flash)
+            MetaLine(icon: "person.2", title: "Людей", value: "\(item.peopleCount)")
+            if let date = item.captureDate {
+                MetaLine(icon: "clock", title: "Время", value: Self.df.string(from: date))
+            }
+            Divider()
+            Text(item.url.path).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+        }
+    }
+}
+
+struct MetaLine: View {
+    let icon: String
+    let title: String
+    let value: String
+    var body: some View {
+        HStack(alignment: .top) {
+            Image(systemName: icon).frame(width: 18)
+            Text(title).foregroundStyle(.secondary)
+            Spacer()
+            Text(value.isEmpty ? "—" : value).multilineTextAlignment(.trailing)
+        }
+        .font(.caption)
+    }
+}
+
+struct EyePreview: View {
+    let crop: CGImage?
+    let found: Bool
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8).fill(.black)
+            if let crop {
+                Image(decorative: crop, scale: 1).resizable().scaledToFit().padding(5)
+            } else {
+                Text(found ? "Не удалось показать" : "Лицо / глаза не найдены")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .frame(height: 145)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct PeopleBadge: View {
+    let count: Int
+    var body: some View {
+        Label("\(count)", systemImage: "person.2.fill")
+            .font(.caption.bold())
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .background(.black.opacity(0.65), in: Capsule())
+            .foregroundStyle(.white)
+    }
+}
+
+enum Metadata {
+    static func read(_ url: URL) -> PhotoItem {
+        let source = CGImageSourceCreateWithURL(url as CFURL, nil)
+        let props = source.flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [CFString: Any] } ?? [:]
+        let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+
+        let dateText = (exif[kCGImagePropertyExifDateTimeOriginal] as? String)
+            ?? (tiff[kCGImagePropertyTIFFDateTime] as? String)
+        let date = dateText.flatMap { parseDate($0) }
+
+        let make = (tiff[kCGImagePropertyTIFFMake] as? String) ?? ""
+        let model = (tiff[kCGImagePropertyTIFFModel] as? String) ?? ""
+        let camera = "\(make) \(model)".trimmingCharacters(in: .whitespaces)
+
+        let lens = (exif[kCGImagePropertyExifLensModel] as? String) ?? ""
+        let f = exif[kCGImagePropertyExifFNumber] as? NSNumber
+        let exposure = exif[kCGImagePropertyExifExposureTime] as? NSNumber
+        let isoArray = exif[kCGImagePropertyExifISOSpeedRatings] as? [NSNumber]
+        let iso = isoArray?.first?.stringValue ?? ""
+        let aperture = f.map { "f/\($0.doubleValue.clean)" } ?? ""
+        let shutter = exposure.map { formatExposure($0.doubleValue) } ?? ""
+        let flashValue = (exif[kCGImagePropertyExifFlash] as? NSNumber)?.intValue ?? 0
+        let flash = (flashValue & 1) != 0 ? "Со вспышкой" : "Без вспышки"
+
+        let people = VisionAnalysis.peopleCount(for: url)
+        return PhotoItem(url: url, rating: XMP.rating(for: url), label: XMP.label(for: url),
+                         orientation: h > w ? .portrait : .landscape, captureDate: date,
+                         camera: camera, lens: lens, aperture: aperture, shutter: shutter,
+                         iso: iso, flash: flash, peopleCount: people)
+    }
+
+    static func parseDate(_ s: String) -> Date? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return f.date(from: s)
+    }
+
+    static func formatExposure(_ v: Double) -> String {
+        guard v > 0 else { return "" }
+        if v >= 0.5 { return String(format: "%.2fs", v) }
+        return "1/\(max(1, Int(round(1 / v))))s"
+    }
+}
+
+extension Double {
+    var clean: String { String(format: "%.1f", self).replacingOccurrences(of: ".0", with: "") }
+}
+
+enum VisionAnalysis {
+    struct EyeResult { let crop: CGImage?; let found: Bool }
+
+    static func thumbnail(_ url: URL) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1800,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ] as CFDictionary)
+    }
+
+    static func peopleCount(for url: URL) -> Int {
+        guard let image = thumbnail(url) else { return 0 }
+        let request = VNDetectHumanRectanglesRequest()
+        try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        return request.results?.count ?? 0
+    }
+
+    static func eyeCrop(for url: URL) -> EyeResult {
+        guard let image = thumbnail(url) else { return EyeResult(crop: nil, found: false) }
+        let request = VNDetectFaceLandmarksRequest()
+        try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        guard let face = request.results?.first else { return EyeResult(crop: nil, found: false) }
+        let b = face.boundingBox
+        let w = CGFloat(image.width), h = CGFloat(image.height)
+        let faceRect = CGRect(x: b.minX * w, y: b.minY * h, width: b.width * w, height: b.height * h)
+        let eyes = CGRect(x: faceRect.minX, y: faceRect.minY + faceRect.height * 0.32,
+                          width: faceRect.width, height: faceRect.height * 0.40)
+            .intersection(CGRect(x: 0, y: 0, width: w, height: h))
+        return EyeResult(crop: image.cropping(to: eyes), found: true)
+    }
+}
+
+enum FileBrowser {
+    static func roots() -> [FolderNode] {
+        var urls = [URL(fileURLWithPath: NSHomeDirectory()), URL(fileURLWithPath: "/")]
+        if let volumes = try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: "/Volumes"),
+                                                                      includingPropertiesForKeys: [.isDirectoryKey],
+                                                                      options: [.skipsHiddenFiles]) {
+            urls.append(contentsOf: volumes)
+        }
+        var seen = Set<String>()
+        return urls.compactMap { build($0, depth: 0, seen: &seen) }
+    }
+
+    static func build(_ url: URL, depth: Int, seen: inout Set<String>) -> FolderNode? {
+        guard depth < 2 else { return FolderNode(url: url, children: []) }
+        let path = url.standardizedFileURL.path
+        guard !seen.contains(path) else { return nil }
+        seen.insert(path)
+        let children = (try? FileManager.default.contentsOfDirectory(at: url,
+                                                                       includingPropertiesForKeys: [.isDirectoryKey],
+                                                                       options: [.skipsHiddenFiles]))?
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            .compactMap { build($0, depth: depth + 1, seen: &seen) } ?? []
+        return FolderNode(url: url, children: children)
     }
 }
 
