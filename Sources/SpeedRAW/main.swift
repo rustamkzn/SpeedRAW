@@ -41,7 +41,7 @@ final class WorkspaceStore: ObservableObject {
         let ws = Workspace()
         observe(ws)
         workspaces.append(ws)
-        store.activeID = ws.id
+        activeID = ws.id
     }
 
     func closeWorkspace(_ ws: Workspace) {
@@ -58,7 +58,7 @@ final class WorkspaceStore: ObservableObject {
         libraryObservers[ws.id] = nil
         workspaces.remove(at: idx)
 
-        if store.activeID == ws.id {
+        if activeID == ws.id {
             activeID = workspaces[min(idx, workspaces.count - 1)].id
         }
     }
