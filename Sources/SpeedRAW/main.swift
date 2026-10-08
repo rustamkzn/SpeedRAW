@@ -323,7 +323,6 @@ enum XMP {
         let x = sidecar(url)
         let safeRating = max(0, min(5, rating))
         let safeLabel = label.replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "\\"", with: "&quot;")
         let existing = (try? String(contentsOf: x, encoding: .utf8)) ?? ""
         let output: String
 
