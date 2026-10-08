@@ -921,10 +921,13 @@ final class ZoomNSView: NSView {
         loadToken = token
         image = nil
         anchor = CGPoint(x: 0.5, y: 0.5)
-        zoom = 1
+        // 0 means "fit to the entire preview canvas". 1 is reserved for 100% zoom.
+        zoom = 0
         needsDisplay = true
 
-        PreviewLoader.load(url: url, size: CGSize(width: 2400, height: 2400)) { [weak self] image in
+        // Request a much larger representation so the main preview stays sharp
+        // on Retina displays instead of showing the small Quick Look thumbnail.
+        PreviewLoader.load(url: url, size: CGSize(width: 4800, height: 4800)) { [weak self] image in
             DispatchQueue.main.async {
                 guard let self, self.loadToken == token else { return }
                 self.image = image
@@ -1098,7 +1101,7 @@ enum PreviewLoader {
             fileAt: url,
             size: size,
             scale: NSScreen.main?.backingScaleFactor ?? 2,
-            representationTypes: .thumbnail
+            representationTypes: .all
         )
 
         QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
