@@ -250,7 +250,7 @@ final class Library: ObservableObject {
         let ids = selectedIDs.isEmpty ? filtered.map(\.id) : Array(selectedIDs)
         guard !ids.isEmpty else { return }
         setRating(value, for: ids, advance: false)
-        status = "Рейтинг \\(value)★ присвоен \\(ids.count) фото"
+        status = "Рейтинг \(value)★ присвоен \(ids.count) фото"
     }
 
     func updateEyePreview() {
@@ -282,7 +282,7 @@ final class Library: ObservableObject {
         } else {
             selectedIDs.formUnion(ids)
         }
-        status = "Выбрано \\(selectedIDs.count) фото"
+        status = "Выбрано \(selectedIDs.count) фото"
     }
 }
 
@@ -330,7 +330,7 @@ struct ContentView: View {
             }.buttonStyle(.plain).help("Светлая / тёмная тема")
             Button(lib.compareItems.count == 2 ? "Сравнить" : "Выбрать 2 фото") { lib.toggleCompare() }
                 .disabled(lib.compareItems.count != 2)
-            Text("v\\(APP_VERSION) • build \\(APP_BUILD)").font(.caption2).foregroundStyle(.secondary)
+            Text("v\(APP_VERSION) • build \(APP_BUILD)").font(.caption2).foregroundStyle(.secondary)
         }
         .padding(10)
     }
@@ -341,7 +341,7 @@ struct ContentView: View {
                 HStack(spacing: 7) {
                     Image(systemName: "photo.on.rectangle")
                     Text(ws.lib.folderName == "Папка не открыта" ? "Новая вкладка" : ws.lib.folderName).lineLimit(1)
-                    if !ws.lib.items.isEmpty { Text("\\(ws.lib.items.count)").font(.caption2).foregroundStyle(.secondary) }
+                    if !ws.lib.items.isEmpty { Text("\(ws.lib.items.count)").font(.caption2).foregroundStyle(.secondary) }
                     Button { closeWorkspace(ws) } label: { Image(systemName: "xmark").font(.caption2) }.buttonStyle(.plain)
                 }
                 .padding(.horizontal, 10).frame(height: 32)
@@ -408,7 +408,7 @@ struct ContentView: View {
             HStack {
                 Text("КАДРЫ").font(.caption.bold()).foregroundStyle(.secondary)
                 Spacer()
-                Text("\\(lib.filtered.isEmpty ? 0 : lib.index + 1)/\\(max(lib.filtered.count, 1))")
+                Text("\(lib.filtered.isEmpty ? 0 : lib.index + 1)/\(max(lib.filtered.count, 1))")
                     .font(.caption2).foregroundStyle(.secondary)
             }.padding(.horizontal, 8).padding(.vertical, 8)
             NearbyStrip(lib: lib).padding(.horizontal, 6).frame(maxHeight: .infinity)
@@ -420,7 +420,7 @@ struct ContentView: View {
             HStack {
                 Text(lib.current?.url.lastPathComponent ?? "Speed RAW").font(.headline).lineLimit(1)
                 Spacer()
-                if !lib.filtered.isEmpty { Text("\\(lib.index + 1) / \\(lib.filtered.count)").font(.caption).foregroundStyle(.secondary) }
+                if !lib.filtered.isEmpty { Text("\(lib.index + 1) / \(lib.filtered.count)").font(.caption).foregroundStyle(.secondary) }
             }.padding(.horizontal, 12).padding(.vertical, 7)
 
             ZStack {
@@ -466,11 +466,11 @@ struct ContentView: View {
 
     private func bottomBar(lib: Library) -> some View {
         HStack(spacing: 12) {
-            Text("Рейтинги: \\(lib.selectedCount) из \\(lib.items.count) • \\(String(format: "%.1f", lib.selectedPercent))%")
+            Text("Рейтинги: \(lib.selectedCount) из \(lib.items.count) • \(String(format: "%.1f", lib.selectedPercent))%")
                 .font(.caption.bold())
             if let c = lib.current {
                 Text(c.label.isEmpty ? "Без цвета" : c.label)
-                Text("Людей: \\(c.peopleCount)")
+                Text("Людей: \(c.peopleCount)")
             }
             Spacer()
             Text(lib.status).font(.caption).lineLimit(1)
@@ -1193,7 +1193,7 @@ enum XMP {
             output = "<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n" +
                 "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n" +
                 "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n" +
-                "<rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:Rating=\"\\(safeRating)\" xmp:Label=\"\\(safeLabel)\"/>\n" +
+                "<rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:Rating=\"\(safeRating)\" xmp:Label=\"\(safeLabel)\"/>\n" +
                 "</rdf:RDF>\n" +
                 "</x:xmpmeta>\n" +
                 "<?xpacket end=\"w\"?>"
