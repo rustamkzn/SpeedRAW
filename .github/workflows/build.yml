@@ -1,4 +1,4 @@
-name: Build Speed RAW # v0.1
+name: Build Speed RAW — Build 15
 
 on:
   push:
@@ -27,13 +27,13 @@ jobs:
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
-          <key>CFBundleDisplayName</key><string>Speed RAW</string>
+          <key>CFBundleDisplayName</key><string>Speed RAW — Build 15</string>
           <key>CFBundleExecutable</key><string>SpeedRAW</string>
           <key>CFBundleIdentifier</key><string>com.rustamkzn.speedraw</string>
           <key>CFBundleName</key><string>Speed RAW</string>
           <key>CFBundlePackageType</key><string>APPL</string>
           <key>CFBundleShortVersionString</key><string>0.1.0</string>
-          <key>CFBundleVersion</key><string>1</string>
+          <key>CFBundleVersion</key><string>15</string>
           <key>LSMinimumSystemVersion</key><string>14.0</string>
           <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
@@ -41,11 +41,14 @@ jobs:
           codesign --force --deep --sign - "$APP"
           mkdir -p SpeedRAW-dmg
           cp -R "$APP" SpeedRAW-dmg/
-          hdiutil create -volname "Speed RAW" -srcfolder SpeedRAW-dmg -ov -format UDZO "Speed-RAW-0.1.0.dmg"
+          hdiutil create -volname "Speed RAW — Build 15" -srcfolder SpeedRAW-dmg -ov -format UDZO "SpeedRAW_Build_15.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "SpeedRAW_Build_15.zip"
 
-      - name: Upload DMG
+      - name: Upload Build 15
         uses: actions/upload-artifact@v4
         with:
-          name: Speed-RAW-macOS
-          path: Speed-RAW-0.1.0.dmg
+          name: SpeedRAW_Build_15
+          path: |
+            SpeedRAW_Build_15.dmg
+            SpeedRAW_Build_15.zip
           if-no-files-found: error
