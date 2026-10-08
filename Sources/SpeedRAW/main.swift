@@ -485,8 +485,6 @@ struct ContentView: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    private var appearanceKey: String { appearanceRaw }
-
     private var appearanceScheme: ColorScheme? {
         appearanceRaw == "dark" ? .dark : appearanceRaw == "light" ? .light : nil
     }
@@ -615,9 +613,8 @@ struct ContentView: View {
                         CompareView(lib: lib)
                     } else {
                         ZoomablePreview(url: item.url, rotation: item.rotation,
-                                         appearanceKey: appearanceKey,
                                          zoom: Binding(get: { lib.zoom }, set: { lib.zoom = $0 }))
-                            .id("\(item.id.uuidString)-\(item.rotation)-\(appearanceKey)")
+                            .id("\(item.id.uuidString)-\(item.rotation)")
                     }
                 } else {
                     VStack(spacing: 8) {
@@ -829,7 +826,6 @@ struct RatingBar: View {
 struct ZoomablePreview: NSViewRepresentable {
     let url: URL
     let rotation: Int
-    let appearanceKey: String
     @Binding var zoom: CGFloat
 
     func makeNSView(context: Context) -> ZoomNSView {
@@ -847,7 +843,6 @@ struct ZoomablePreview: NSViewRepresentable {
         }
         nsView.rotation = rotation
         nsView.zoom = zoom
-        nsView.applyAppearanceKey(appearanceKey)
         nsView.load(url: url)
         nsView.needsDisplay = true
     }
@@ -865,15 +860,7 @@ final class ZoomNSView: NSView {
     private var loadToken = UUID()
     private var dragStart = CGPoint.zero
     private var dragAnchor = CGPoint(x: 0.5, y: 0.5)
-    private var appearanceKey = ""
-
     override var isOpaque: Bool { true }
-
-    func applyAppearanceKey(_ key: String) {
-        guard key != appearanceKey else { return }
-        appearanceKey = key
-        needsDisplay = true
-    }
 
     func load(url: URL) {
         guard loadedURL != url else { return }
@@ -893,6 +880,13 @@ final class ZoomNSView: NSView {
                 self.needsDisplay = true
             }
         }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        // Preview canvas is intentionally independent from app theme.
+        layer?.backgroundColor = NSColor.black.cgColor
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
