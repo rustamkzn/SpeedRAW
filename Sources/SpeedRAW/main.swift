@@ -124,7 +124,7 @@ final class Library: ObservableObject {
             DispatchQueue.main.async {
                 self.items = loaded
                 self.index = 0
-                self.status = "(loaded.count) файлов"
+                self.status = "\\(loaded.count) файлов"
             }
         }
     }
@@ -134,7 +134,7 @@ final class Library: ObservableObject {
         guard let i = items.firstIndex(where: { $0.id == current.id }) else { return }
         XMP.write(rating: value, label: items[i].label, for: items[i].url)
         items[i].rating = value
-        status = "(value)★  •  (items[i].url.lastPathComponent)"
+        status = "\\(value)★  •  \\(items[i].url.lastPathComponent)"
         if autoAdvance { move(1) }
     }
 
@@ -143,7 +143,7 @@ final class Library: ObservableObject {
         guard let i = items.firstIndex(where: { $0.id == current.id }) else { return }
         XMP.write(rating: items[i].rating, label: label, for: items[i].url)
         items[i].label = label
-        status = "(label)  •  (items[i].url.lastPathComponent)"
+        status = "\\(label)  •  \\(items[i].url.lastPathComponent)"
         if autoAdvance { move(1) }
     }
 
@@ -323,20 +323,18 @@ enum XMP {
         let x = sidecar(url)
         let safeRating = max(0, min(5, rating))
         let safeLabel = label.replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: """, with: "&quot;")
+            .replacingOccurrences(of: "\\"", with: "&quot;")
         let existing = (try? String(contentsOf: x, encoding: .utf8)) ?? ""
         let output: String
 
         if existing.isEmpty {
-            output = """
-            <?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
-            <x:xmpmeta xmlns:x="adobe:ns:meta/">
-            <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-            <rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="\(safeRating)" xmp:Label="\(safeLabel)"/>
-            </rdf:RDF>
-            </x:xmpmeta>
-            <?xpacket end="w"?>
-            """
+            output = "<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n" +
+                "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n" +
+                "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n" +
+                "<rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:Rating=\"\\(safeRating)\" xmp:Label=\"\\(safeLabel)\"/>\n" +
+                "</rdf:RDF>\n" +
+                "</x:xmpmeta>\n" +
+                "<?xpacket end=\"w\"?>"
         } else {
             var text = existing
             text = setAttribute("xmp:Rating", value: String(safeRating), in: text)
