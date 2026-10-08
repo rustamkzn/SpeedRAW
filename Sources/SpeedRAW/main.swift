@@ -7,7 +7,7 @@ import Vision
 import AVFoundation
 
 let APP_VERSION = "0.2.0"
-let APP_BUILD = 19
+let APP_BUILD = 20
 
 @MainActor
 final class Workspace: ObservableObject, Identifiable {
@@ -156,7 +156,7 @@ final class Library: ObservableObject {
     func load(_ folder: URL) {
         currentFolder = folder
         folderName = folder.lastPathComponent
-        status = "Быстрое сканирование…"
+        status = "Сканирование папки…"
         items.removeAll(keepingCapacity: true)
         selectedIDs.removeAll()
         index = 0
@@ -168,54 +168,39 @@ final class Library: ObservableObject {
         loadGeneration = generation
         let exts = Set(["jpg","jpeg","png","heic","heif","cr2","cr3","nef","arw","raf","rw2","orf","dng"])
 
+        // Critical culling rule: opening a folder must NOT read XMP/EXIF/RAW data
+        // for every file. We only enumerate paths first and publish them immediately.
         DispatchQueue.global(qos: .userInitiated).async {
             let fm = FileManager.default
-            let urls = (fm.enumerator(at: folder,
-                                      includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
-                                      options: [.skipsHiddenFiles])?
-                .compactMap { $0 as? URL }
-                .filter { exts.contains($0.pathExtension.lowercased()) }) ?? []
+            let urls = (fm.enumerator(
+                at: folder,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )?.compactMap { $0 as? URL }
+                .filter { url in
+                    guard exts.contains(url.pathExtension.lowercased()) else { return false }
+                    return (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+                }) ?? []
 
-            let sortedURLs = urls.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
-            let lightweight = sortedURLs.map { url -> PhotoItem in
-                PhotoItem(url: url,
-                          rating: XMP.rating(for: url),
-                          label: XMP.label(for: url),
-                          rotation: XMP.rotation(for: url),
-                          orientation: .landscape)
+            let sortedURLs = urls.sorted {
+                $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
             }
+
+            let lightweight = sortedURLs.map { PhotoItem(url: $0) }
 
             DispatchQueue.main.async {
                 guard self.loadGeneration == generation else { return }
                 self.items = lightweight
-                self.status = "(lightweight.count) файлов • превью готовы"
+                self.status = "\(lightweight.count) файлов • загрузка рейтингов…"
                 self.sidebarRoots = FileBrowser.roots(focus: folder)
+                self.loadQuickMetadata(for: sortedURLs, generation: generation)
+                self.hydrateMetadata(around: 0, generation: generation)
                 self.updateEyePreview()
-            }
-
-            // Metadata is intentionally non-blocking.
-            let batchSize = 24
-            for start in stride(from: 0, to: sortedURLs.count, by: batchSize) {
-                let end = min(start + batchSize, sortedURLs.count)
-                let batch = Array(sortedURLs[start..<end]).map { Metadata.read($0) }
-                DispatchQueue.main.async {
-                    guard self.loadGeneration == generation else { return }
-                    for meta in batch {
-                        if let i = self.items.firstIndex(where: { $0.url == meta.url }) {
-                            self.items[i].orientation = meta.orientation
-                            self.items[i].captureDate = meta.captureDate
-                            self.items[i].camera = meta.camera
-                            self.items[i].lens = meta.lens
-                            self.items[i].aperture = meta.aperture
-                            self.items[i].shutter = meta.shutter
-                            self.items[i].iso = meta.iso
-                            self.items[i].flash = meta.flash
-                        }
-                    }
-                }
             }
         }
     }
+
+    var loadGenerationForUI: UUID { loadGeneration }
 
     func loadFromSidebar(_ url: URL) {
         guard url.hasDirectoryPath else { return }
@@ -304,7 +289,7 @@ final class Library: ObservableObject {
         guard let current, let i = items.firstIndex(where: { $0.id == current.id }) else { return }
         let step = clockwise ? 90 : 270
         items[i].rotation = (items[i].rotation + step) % 360
-        XMP.setRotation(for: items[i].url, degrees: items[i].rotation)
+        XMP.setRotationAsync(for: items[i].url, degrees: items[i].rotation)
         status = clockwise ? "Поворот по часовой" : "Поворот против часовой"
     }
 
@@ -327,6 +312,7 @@ final class Library: ObservableObject {
         guard !filtered.isEmpty else { return }
         index = min(max(index + delta, 0), filtered.count - 1)
         zoom = 1
+        hydrateMetadata(around: index, generation: loadGeneration)
         updateEyePreview()
     }
 
@@ -337,13 +323,36 @@ final class Library: ObservableObject {
 
     func setRating(_ value: Int, for ids: [UUID], advance: Bool = false) {
         let safe = max(0, min(5, value))
+        let currentID = ids.count == 1 ? ids[0] : nil
+        let oldFilteredIndex = currentID.flatMap { id in filtered.firstIndex(where: { $0.id == id }) }
+
         for id in ids {
             guard let i = items.firstIndex(where: { $0.id == id }) else { continue }
-            XMP.write(rating: safe, label: items[i].label, for: items[i].url)
+            let label = items[i].label
+            let url = items[i].url
             items[i].rating = safe
+            // Disk I/O is off the main thread so rating never blocks culling/navigation.
+            XMP.writeAsync(rating: safe, label: label, for: url)
         }
+
         status = safe == 0 ? "Рейтинг сброшен" : "Рейтинг \(safe)★ установлен"
-        if advance && ids.count == 1 { move(1) }
+
+        guard advance, let oldFilteredIndex, ids.count == 1 else { return }
+
+        // Respect filters. If the current image disappears from the filtered list
+        // (for example "Без оценки"), stay at its old position instead of skipping one.
+        let newCount = filtered.count
+        if newCount == 0 {
+            index = 0
+        } else if filtered.contains(where: { $0.id == currentID }) {
+            index = min(oldFilteredIndex + 1, newCount - 1)
+        } else {
+            index = min(oldFilteredIndex, newCount - 1)
+        }
+
+        zoom = 1
+        hydrateMetadata(around: index, generation: loadGeneration)
+        updateEyePreview()
     }
 
     func rateSelected(_ value: Int) {
@@ -351,6 +360,55 @@ final class Library: ObservableObject {
         guard !ids.isEmpty else { return }
         setRating(value, for: ids, advance: false)
         status = "Рейтинг \(value)★ присвоен \(ids.count) фото"
+    }
+
+    func loadQuickMetadata(for urls: [URL], generation: UUID) {
+        DispatchQueue.global(qos: .utility).async {
+            let batchSize = 80
+            for start in stride(from: 0, to: urls.count, by: batchSize) {
+                guard self.loadGeneration == generation else { return }
+                let end = min(start + batchSize, urls.count)
+                let result = urls[start..<end].map { url in
+                    (url, XMP.quickMetadata(for: url))
+                }
+
+                DispatchQueue.main.async {
+                    guard self.loadGeneration == generation else { return }
+                    for (url, quick) in result {
+                        guard let i = self.items.firstIndex(where: { $0.url == url }) else { continue }
+                        self.items[i].rating = quick.rating
+                        self.items[i].label = quick.label
+                        self.items[i].rotation = quick.rotation
+                    }
+                    self.status = "\(self.items.count) файлов • готово"
+                }
+            }
+        }
+    }
+
+    func hydrateMetadata(around center: Int, generation: UUID) {
+        guard !filtered.isEmpty else { return }
+        let start = max(0, center - 2)
+        let end = min(filtered.count, center + 4)
+        let urls = filtered[start..<end].map(\.url)
+
+        DispatchQueue.global(qos: .utility).async {
+            let result = urls.map { Metadata.read($0) }
+            DispatchQueue.main.async {
+                guard self.loadGeneration == generation else { return }
+                for meta in result {
+                    guard let i = self.items.firstIndex(where: { $0.url == meta.url }) else { continue }
+                    self.items[i].orientation = meta.orientation
+                    self.items[i].captureDate = meta.captureDate
+                    self.items[i].camera = meta.camera
+                    self.items[i].lens = meta.lens
+                    self.items[i].aperture = meta.aperture
+                    self.items[i].shutter = meta.shutter
+                    self.items[i].iso = meta.iso
+                    self.items[i].flash = meta.flash
+                }
+            }
+        }
     }
 
     func updateEyePreview() {
@@ -426,6 +484,8 @@ struct ContentView: View {
         .preferredColorScheme(appearanceScheme)
         .background(Color(nsColor: .windowBackgroundColor))
     }
+
+    private var appearanceKey: String { appearanceRaw }
 
     private var appearanceScheme: ColorScheme? {
         appearanceRaw == "dark" ? .dark : appearanceRaw == "light" ? .light : nil
@@ -555,7 +615,9 @@ struct ContentView: View {
                         CompareView(lib: lib)
                     } else {
                         ZoomablePreview(url: item.url, rotation: item.rotation,
+                                         appearanceKey: appearanceKey,
                                          zoom: Binding(get: { lib.zoom }, set: { lib.zoom = $0 }))
+                            .id("\(item.id.uuidString)-\(item.rotation)-\(appearanceKey)")
                     }
                 } else {
                     VStack(spacing: 8) {
@@ -648,44 +710,74 @@ final class KeyCatcher: NSView {
 
 struct NearbyStrip: View {
     @ObservedObject var lib: Library
+
     var body: some View {
-        ScrollView(.vertical, showsIndicators: true) {
-            LazyVStack(spacing: 6) {
-                ForEach(Array(lib.filtered.indices), id: \.self) { idx in
-                    let item = lib.filtered[idx]
-                    Button {
-                        lib.index = idx
-                        lib.zoom = 1
-                        lib.updateEyePreview()
-                    } label: {
-                        ZStack(alignment: .bottom) {
-                            CachedThumb(url: item.url)
-                                .frame(maxWidth: .infinity, minHeight: 86, maxHeight: 112)
-                                .clipped().background(.black)
-                            HStack(spacing: 2) {
-                                ForEach(1...5, id: \.self) { value in
-                                    Image(systemName: value <= item.rating ? "star.fill" : "star")
-                                        .font(.system(size: 8, weight: .bold))
-                                        .foregroundStyle(value <= item.rating ? Color.yellow : Color.white.opacity(0.75))
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(spacing: 6) {
+                    ForEach(Array(lib.filtered.indices), id: \.self) { idx in
+                        let item = lib.filtered[idx]
+                        Button {
+                            lib.index = idx
+                            lib.zoom = 1
+                            lib.hydrateMetadata(around: idx, generation: lib.loadGenerationForUI)
+                            lib.updateEyePreview()
+                            DispatchQueue.main.async {
+                                withAnimation(.easeOut(duration: 0.12)) {
+                                    proxy.scrollTo(idx, anchor: .center)
                                 }
                             }
-                            .padding(.horizontal, 5).padding(.vertical, 3)
-                            .background(.black.opacity(0.7)).clipShape(Capsule())
-                            .padding(.bottom, 4)
-                            if idx == lib.index {
-                                RoundedRectangle(cornerRadius: 5).stroke(Color.accentColor, lineWidth: 3)
+                        } label: {
+                            ZStack(alignment: .bottom) {
+                                CachedThumb(url: item.url)
+                                    .frame(maxWidth: .infinity, minHeight: 86, maxHeight: 112)
+                                    .clipped()
+                                    .background(.black)
+
+                                HStack(spacing: 2) {
+                                    ForEach(1...5, id: \.self) { value in
+                                        Image(systemName: value <= item.rating ? "star.fill" : "star")
+                                            .font(.system(size: 8, weight: .bold))
+                                            .foregroundStyle(value <= item.rating ? Color.yellow : Color.white.opacity(0.75))
+                                    }
+                                }
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 3)
+                                .background(.black.opacity(0.7))
+                                .clipShape(Capsule())
+                                .padding(.bottom, 4)
+
+                                if idx == lib.index {
+                                    RoundedRectangle(cornerRadius: 5)
+                                        .stroke(Color.accentColor, lineWidth: 3)
+                                }
                             }
                         }
-                    }
-                    .buttonStyle(.plain)
-                    .overlay(alignment: .topLeading) {
-                        Text("(entry.offset + 1)")
-                            .font(.system(size: 8, weight: .bold))
-                            .padding(.horizontal, 4).padding(.vertical, 2)
-                            .background(.black.opacity(0.75)).foregroundStyle(.white)
+                        .buttonStyle(.plain)
+                        .id(idx)
+                        .contextMenu {
+                            PhotoContextMenu(item: item, lib: lib)
+                        }
+                        .overlay(alignment: .topLeading) {
+                            Text("\(idx + 1)")
+                                .font(.system(size: 8, weight: .bold))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
+                                .background(.black.opacity(0.75))
+                                .foregroundStyle(.white)
+                        }
                     }
                 }
-            }.padding(.vertical, 4)
+                .padding(.vertical, 4)
+            }
+            .onChange(of: lib.index) { _, newIndex in
+                guard newIndex >= 0, newIndex < lib.filtered.count else { return }
+                DispatchQueue.main.async {
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        proxy.scrollTo(newIndex, anchor: .center)
+                    }
+                }
+            }
         }
     }
 }
@@ -737,14 +829,25 @@ struct RatingBar: View {
 struct ZoomablePreview: NSViewRepresentable {
     let url: URL
     let rotation: Int
+    let appearanceKey: String
     @Binding var zoom: CGFloat
+
     func makeNSView(context: Context) -> ZoomNSView {
-        let view = ZoomNSView(); view.rotation = rotation; view.load(url: url); return view
+        let view = ZoomNSView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.black.cgColor
+        view.rotation = rotation
+        view.load(url: url)
+        return view
     }
+
     func updateNSView(_ nsView: ZoomNSView, context: Context) {
-        nsView.onZoom = { value in DispatchQueue.main.async { self.zoom = value } }
+        nsView.onZoom = { value in
+            DispatchQueue.main.async { self.zoom = value }
+        }
         nsView.rotation = rotation
         nsView.zoom = zoom
+        nsView.applyAppearanceKey(appearanceKey)
         nsView.load(url: url)
         nsView.needsDisplay = true
     }
@@ -753,68 +856,116 @@ struct ZoomablePreview: NSViewRepresentable {
 final class ZoomNSView: NSView {
     var image: NSImage?
     var zoom: CGFloat = 1
-    var rotation: Int = 0
+    var rotation: Int = 0 {
+        didSet { if oldValue != rotation { needsDisplay = true } }
+    }
     var onZoom: ((CGFloat) -> Void)?
     private var anchor = CGPoint(x: 0.5, y: 0.5)
     private var loadedURL: URL?
     private var loadToken = UUID()
     private var dragStart = CGPoint.zero
     private var dragAnchor = CGPoint(x: 0.5, y: 0.5)
+    private var appearanceKey = ""
+
+    override var isOpaque: Bool { true }
+
+    func applyAppearanceKey(_ key: String) {
+        guard key != appearanceKey else { return }
+        appearanceKey = key
+        needsDisplay = true
+    }
 
     func load(url: URL) {
         guard loadedURL != url else { return }
         loadedURL = url
-        let token = UUID(); loadToken = token
-        image = nil; anchor = CGPoint(x: 0.5, y: 0.5); needsDisplay = true
-        PreviewLoader.load(url: url) { [weak self] image in
+        let token = UUID()
+        loadToken = token
+        image = nil
+        anchor = CGPoint(x: 0.5, y: 0.5)
+        zoom = 1
+        needsDisplay = true
+
+        PreviewLoader.load(url: url, size: CGSize(width: 2400, height: 2400)) { [weak self] image in
             DispatchQueue.main.async {
                 guard let self, self.loadToken == token else { return }
-                self.image = image; self.needsDisplay = true
+                self.image = image
+                self.zoom = max(1, self.zoom)
+                self.needsDisplay = true
             }
         }
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.black.setFill(); dirtyRect.fill()
-        guard let image else {
+        NSColor.black.setFill()
+        dirtyRect.fill()
+
+        guard let image, image.size.width > 0, image.size.height > 0 else {
             let text = "Загрузка превью…"
-            let attrs: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor.white.withAlphaComponent(0.65), .font: NSFont.systemFont(ofSize: 13)]
-            (text as NSString).draw(at: NSPoint(x: bounds.midX - 45, y: bounds.midY), withAttributes: attrs)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .foregroundColor: NSColor.white.withAlphaComponent(0.65),
+                .font: NSFont.systemFont(ofSize: 13)
+            ]
+            (text as NSString).draw(
+                at: NSPoint(x: bounds.midX - 45, y: bounds.midY),
+                withAttributes: attrs
+            )
             return
         }
-        let angle = CGFloat((rotation % 360 + 360) % 360) * .pi / 180
-        let rotatedAspect = rotation % 180 == 0 ? image.size : CGSize(width: image.size.height, height: image.size.width)
-        let base = AVMakeRect(aspectRatio: rotatedAspect, insideRect: bounds)
-        let effectiveZoom: CGFloat = zoom == 0
-            ? max(rotatedAspect.width / max(base.width, 1), rotatedAspect.height / max(base.height, 1))
-            : zoom
-        let w = base.width * effectiveZoom
-        let h = base.height * effectiveZoom
-        let cx = bounds.midX - w * (anchor.x - 0.5)
-        let cy = bounds.midY + h * (anchor.y - 0.5)
+
+        let normalizedRotation = ((rotation % 360) + 360) % 360
+        let angle = CGFloat(normalizedRotation) * .pi / 180
+        let rotatedAspect = normalizedRotation % 180 == 0
+            ? image.size
+            : CGSize(width: image.size.height, height: image.size.width)
+
+        let fitRect = AVMakeRect(aspectRatio: rotatedAspect, insideRect: bounds)
+        let fitScale = max(fitRect.width / max(rotatedAspect.width, 1),
+                           fitRect.height / max(rotatedAspect.height, 1))
+        let effectiveZoom = zoom <= 0 ? fitScale : max(1, zoom)
+        let drawW = rotatedAspect.width * effectiveZoom
+        let drawH = rotatedAspect.height * effectiveZoom
+
+        let centerX = bounds.midX - (anchor.x - 0.5) * drawW
+        let centerY = bounds.midY + (anchor.y - 0.5) * drawH
+
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         ctx.saveGState()
-        ctx.translateBy(x: cx, y: cy)
+        ctx.translateBy(x: centerX, y: centerY)
         ctx.rotate(by: -angle)
-        image.draw(in: CGRect(x: -w/2, y: -h/2, width: w, height: h), from: .zero, operation: .sourceOver, fraction: 1)
+
+        let rect = CGRect(x: -drawW / 2, y: -drawH / 2, width: drawW, height: drawH)
+        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0,
+                   respectFlipped: isFlipped, hints: nil)
+
         ctx.restoreGState()
     }
 
     override func mouseDown(with event: NSEvent) {
-        dragStart = convert(event.locationInWindow, from: nil); dragAnchor = anchor
+        dragStart = convert(event.locationInWindow, from: nil)
+        dragAnchor = anchor
     }
+
     override func mouseDragged(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         let dx = (p.x - dragStart.x) / max(bounds.width, 1)
         let dy = (p.y - dragStart.y) / max(bounds.height, 1)
-        anchor = CGPoint(x: max(0, min(1, dragAnchor.x - dx)), y: max(0, min(1, dragAnchor.y + dy)))
+        anchor = CGPoint(
+            x: max(0, min(1, dragAnchor.x - dx)),
+            y: max(0, min(1, dragAnchor.y + dy))
+        )
         needsDisplay = true
     }
+
     override func scrollWheel(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        anchor = CGPoint(x: max(0, min(1, p.x / max(bounds.width, 1))), y: max(0, min(1, p.y / max(bounds.height, 1))))
+        anchor = CGPoint(
+            x: max(0, min(1, p.x / max(bounds.width, 1))),
+            y: max(0, min(1, p.y / max(bounds.height, 1)))
+        )
         let factor: CGFloat = event.scrollingDeltaY > 0 ? 1.12 : 0.89
-        zoom = min(8, max(1, zoom * factor)); onZoom?(zoom); needsDisplay = true
+        zoom = min(8, max(1, zoom * factor))
+        onZoom?(zoom)
+        needsDisplay = true
     }
 }
 
@@ -867,18 +1018,18 @@ struct CachedThumb: View {
         ZStack {
             Color.black
             if let image {
-                Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
             } else {
                 ProgressView().controlSize(.small)
             }
         }
         .task(id: url) {
             await withCheckedContinuation { continuation in
-                PreviewLoader.load(url: url) { img in
-                    DispatchQueue.main.async {
-                        image = img
-                        continuation.resume()
-                    }
+                PreviewLoader.load(url: url, size: CGSize(width: 420, height: 420)) { img in
+                    image = img
+                    continuation.resume()
                 }
             }
         }
@@ -888,35 +1039,38 @@ struct CachedThumb: View {
 enum PreviewLoader {
     private static let cache = NSCache<NSURL, NSImage>()
 
-    static func load(url: URL, completion: @escaping (NSImage?) -> Void) {
-        if let cached = cache.object(forKey: url as NSURL) {
+    static func load(url: URL, size: CGSize, completion: @escaping @Sendable (NSImage?) -> Void) {
+        let key = url as NSURL
+        if let cached = cache.object(forKey: key) {
             completion(cached)
             return
         }
 
         let request = QLThumbnailGenerator.Request(
             fileAt: url,
-            size: CGSize(width: 1800, height: 1800),
+            size: size,
             scale: NSScreen.main?.backingScaleFactor ?? 2,
             representationTypes: .thumbnail
         )
 
         QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
-            if let representation {
+            if let representation, representation.cgImage.width > 0, representation.cgImage.height > 0 {
+                let cg = representation.cgImage
                 let image = NSImage(
-                    cgImage: representation.cgImage,
-                    size: representation.contentRect.size
+                    cgImage: cg,
+                    size: NSSize(width: cg.width, height: cg.height)
                 )
-                cache.setObject(image, forKey: url as NSURL)
+                cache.setObject(image, forKey: key)
                 completion(image)
                 return
             }
 
-            // Last-resort fallback for formats Quick Look cannot thumbnail.
-            DispatchQueue.global(qos: .userInitiated).async {
-                let image = NSImage(contentsOf: url)
-                if let image { cache.setObject(image, forKey: url as NSURL) }
-                completion(image)
+            DispatchQueue.global(qos: .utility).async {
+                let fallback = NSImage(contentsOf: url)
+                if let fallback {
+                    cache.setObject(fallback, forKey: key)
+                }
+                completion(fallback)
             }
         }
     }
@@ -1269,6 +1423,12 @@ enum XMP {
         }
     }
 
+    static func setRotationAsync(for url: URL, degrees: Int) {
+        ioQueue.async {
+            setRotation(for: url, degrees: degrees)
+        }
+    }
+
     static func setRotation(for url: URL, degrees: Int) {
         let value = ((degrees % 360) + 360) % 360
         let xmpURL = sidecar(url)
@@ -1301,6 +1461,26 @@ enum XMP {
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
               let range = Range(match.range(at: 1), in: text) else { return nil }
         return String(text[range])
+    }
+
+    struct QuickMetadata {
+        let rating: Int
+        let label: String
+        let rotation: Int
+    }
+
+    static func quickMetadata(for url: URL) -> QuickMetadata {
+        guard let text = try? String(contentsOf: sidecar(url), encoding: .utf8) else {
+            return QuickMetadata(rating: 0, label: "", rotation: 0)
+        }
+        let rating = Int(readAttribute("xmp:Rating", from: text) ?? "") ?? 0
+        let rotation = Int(readAttribute("xmp:Rotation", from: text) ?? "") ?? 0
+        let label = readAttribute("xmp:Label", from: text) ?? ""
+        return QuickMetadata(
+            rating: max(0, min(5, rating)),
+            label: label,
+            rotation: ((rotation % 360) + 360) % 360
+        )
     }
 
     static func rating(for url: URL) -> Int {
