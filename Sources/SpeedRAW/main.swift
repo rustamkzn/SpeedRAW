@@ -85,6 +85,8 @@ final class Library: ObservableObject {
     @Published var sidebarRoots: [FolderNode] = []
     @Published var eyeCrop: CGImage?
     @Published var eyeFound = false
+    @Published var exportSettings = ExportSettings()
+    @Published var exportStatus = ""
 
     var filtered: [PhotoItem] {
         items.filter { item in
@@ -181,6 +183,32 @@ final class Library: ObservableObject {
         sidebarRoots = FileBrowser.roots()
     }
 
+    func rotateCurrent(clockwise: Bool) {
+        guard let item = current else { return }
+        let key = clockwise ? "com.apple.Safari" : "com.apple.Safari"
+        // Store a reversible rotation preference in XMP without touching the original pixels.
+        XMP.setOrientation(for: item.url, clockwise: clockwise)
+        if let i = items.firstIndex(where: { $0.id == item.id }) {
+            items[i].orientation = ImageInfo.orientation(for: item.url)
+        }
+        status = clockwise ? "Поворот по часовой" : "Поворот против часовой"
+    }
+
+    func exportCurrentJPEG() {
+        guard let item = current else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = item.url.deletingPathExtension().lastPathComponent + ".jpg"
+        panel.allowedContentTypes = [.jpeg]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            _ = try Exporter.exportJPEG(item, settings: exportSettings, destination: url.deletingLastPathComponent())
+            exportStatus = "JPEG готов"
+            status = "Экспортировано: \(url.lastPathComponent)"
+        } catch {
+            status = "Ошибка экспорта: \(error.localizedDescription)"
+        }
+    }
+
     func rate(_ value: Int) {
         guard let current else { return }
         guard let i = items.firstIndex(where: { $0.id == current.id }) else { return }
@@ -236,6 +264,16 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HStack {
                 Button { lib.openFolder() } label: { Label("Открыть папку", systemImage: "folder") }
+                Button { lib.rotateCurrent(clockwise: false) } label: { Image(systemName: "rotate.left") }.help("Повернуть против часовой")
+                Button { lib.rotateCurrent(clockwise: true) } label: { Image(systemName: "rotate.right") }.help("Повернуть по часовой")
+                Button { lib.exportCurrentJPEG() } label: { Label("JPEG", systemImage: "arrow.down.doc") }.help("Быстрый экспорт RAW → JPEG")
+                Menu {
+                    Picker("Режим", selection: $lib.exportSettings.mode) {
+                        ForEach(ExportMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    TextField("Длинная сторона, px", value: $lib.exportSettings.longSide, format: .number)
+                    TextField("Максимум MB", value: $lib.exportSettings.maxMB, format: .number)
+                } label: { Image(systemName: "slider.horizontal.3") }.help("Настройки JPEG")
                     .keyboardShortcut("o", modifiers: [.command])
                 Text(lib.folderName).font(.headline).lineLimit(1)
                 Spacer()
@@ -689,7 +727,95 @@ enum FileBrowser {
     }
 }
 
+
+
+enum ExportMode: String, CaseIterable, Identifiable {
+    case longSide = "Длинная сторона"
+    case maxSize = "Максимальный размер файла"
+    var id: String { rawValue }
+}
+
+struct ExportSettings {
+    var mode: ExportMode = .longSide
+    var longSide: Int = 3000
+    var maxMB: Double = 5
+    var quality: CGFloat = 1.0
+}
+
+final class Exporter {
+    static func exportJPEG(_ item: PhotoItem, settings: ExportSettings, destination: URL) throws -> URL {
+        guard let source = CGImageSourceCreateWithURL(item.url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw NSError(domain: "SpeedRAW", code: 1, userInfo: [NSLocalizedDescriptionKey: "Не удалось декодировать RAW"])
+        }
+
+        let originalW = image.width, originalH = image.height
+        let scale: CGFloat
+        switch settings.mode {
+        case .longSide:
+            scale = min(1, CGFloat(settings.longSide) / CGFloat(max(originalW, originalH)))
+        case .maxSize:
+            scale = 1
+        }
+        let w = max(1, Int(CGFloat(originalW) * scale))
+        let h = max(1, Int(CGFloat(originalH) * scale))
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            throw NSError(domain: "SpeedRAW", code: 2)
+        }
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let scaled = ctx.makeImage() else { throw NSError(domain: "SpeedRAW", code: 3) }
+
+        let base = destination.appendingPathComponent(item.url.deletingPathExtension().lastPathComponent + ".jpg")
+        if settings.mode == .longSide {
+            try writeJPEG(scaled, url: base, quality: 1.0)
+            return base
+        }
+
+        var q: CGFloat = 1.0
+        var data = try jpegData(scaled, quality: q)
+        let target = Int(settings.maxMB * 1024 * 1024)
+        while data.count > target && q > 0.35 {
+            q -= 0.05
+            data = try jpegData(scaled, quality: q)
+        }
+        try data.write(to: base, options: .atomic)
+        return base
+    }
+
+    private static func jpegData(_ image: CGImage, quality: CGFloat) throws -> Data {
+        let d = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(d, "public.jpeg" as CFString, 1, nil) else {
+            throw NSError(domain: "SpeedRAW", code: 4)
+        }
+        CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { throw NSError(domain: "SpeedRAW", code: 5) }
+        return d as Data
+    }
+
+    private static func writeJPEG(_ image: CGImage, url: URL, quality: CGFloat) throws {
+        try jpegData(image, quality: quality).write(to: url, options: .atomic)
+    }
+}
+
 enum XMP {
+    static func setOrientation(for url: URL, clockwise: Bool) {
+        // The original RAW remains untouched; rotation is recorded in XMP for compatible viewers.
+        let value = clockwise ? "6" : "8"
+        let xmpURL = url.deletingPathExtension().appendingPathExtension("xmp")
+        var text = (try? String(contentsOf: xmpURL, encoding: .utf8)) ?? ""
+        if text.isEmpty { text = "<x:xmpmeta xmlns:x="adobe:ns:meta/"/>" }
+        if text.contains("tiff:Orientation=") {
+            text = text.replacingOccurrences(of: #"tiff:Orientation="[0-9]+""#, with: #"tiff:Orientation="#(value)""#, options: .regularExpression)
+        } else {
+            text = text.replacingOccurrences(of: "/>", with: " tiff:Orientation="\(value)"/>")
+        }
+        try? text.write(to: xmpURL, atomically: true, encoding: .utf8)
+    }
+
     static func sidecar(_ url: URL) -> URL {
         url.deletingPathExtension().appendingPathExtension("xmp")
     }
