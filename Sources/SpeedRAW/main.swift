@@ -266,30 +266,26 @@ struct ContentView: View {
         VStack(spacing: 0) {
             HStack {
                 Button { lib.openFolder() } label: { Label("Открыть папку", systemImage: "folder") }
-                Button { lib.rotateCurrent(clockwise: false) } label: { Image(systemName: "rotate.left") }.help("Повернуть против часовой")
-                Button { lib.rotateCurrent(clockwise: true) } label: { Image(systemName: "rotate.right") }.help("Повернуть по часовой")
-                Button { lib.exportCurrentJPEG() } label: { Label("JPEG", systemImage: "arrow.down.doc") }.help("Быстрый экспорт RAW → JPEG")
-                Menu {
-                    Picker("Режим", selection: $lib.exportSettings.mode) {
-                        ForEach(ExportMode.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    TextField("Длинная сторона, px", value: $lib.exportSettings.longSide, format: .number)
-                    TextField("Максимум MB", value: $lib.exportSettings.maxMB, format: .number)
-                } label: { Image(systemName: "slider.horizontal.3") }.help("Настройки JPEG")
-                    .keyboardShortcut("o", modifiers: [.command])
+                Button { lib.rotateCurrent(clockwise: false) } label: { Image(systemName: "rotate.left") }
+                Button { lib.rotateCurrent(clockwise: true) } label: { Image(systemName: "rotate.right") }
+                Button { lib.exportCurrentJPEG() } label: { Label("JPEG", systemImage: "arrow.down.doc") }
                 Text(lib.folderName).font(.headline).lineLimit(1)
                 Spacer()
-                Button(lib.compareItems.count == 2 ? "Сравнить" : "Выбрать 2 фото"){lib.toggleCompare()}.disabled(lib.compareItems.count != 2)
-                Button(lib.selectedIDs.contains(lib.current?.id ?? UUID()) ? "Снять выбор" : "Выбрать"){lib.toggleSelected()}.disabled(lib.current == nil)
+                Button(lib.compareItems.count == 2 ? "Сравнить" : "Выбрать 2 фото") { lib.toggleCompare() }
+                    .disabled(lib.compareItems.count != 2)
+                Button(lib.selectedIDs.contains(lib.current?.id ?? UUID()) ? "Снять выбор" : "Выбрать") { lib.toggleSelected() }
+                    .disabled(lib.current == nil)
                 Toggle("Автопереход", isOn: $lib.autoAdvance)
                 Button(showFilterControls ? "Скрыть фильтры" : "Фильтры") { showFilterControls.toggle() }
             }
-            .padding(12)
+            .padding(10)
 
             Divider()
 
             HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 0) {
+                // Левая колонка: сначала дерево папок, затем ближайшие кадры.
+                VStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 0) {
                         HStack {
                             Text("ПАПКИ И ДИСКИ").font(.caption.bold()).foregroundStyle(.secondary)
                             Spacer()
@@ -297,7 +293,6 @@ struct ContentView: View {
                                 Image(systemName: "folder.badge.plus")
                             }
                             .buttonStyle(.plain)
-                            .help("Создать папку в открытой папке")
                         }
                         .padding(.horizontal, 10).padding(.vertical, 8)
 
@@ -309,11 +304,28 @@ struct ContentView: View {
                             }
                             .padding(.vertical, 5)
                         }
+                    }
+                    .frame(maxHeight: .infinity)
 
-                        if showFilterControls {
-                            Divider().padding(.top, 5)
+                    Divider()
 
-                            VStack(alignment: .leading, spacing: 7) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("БЛИЖАЙШИЕ КАДРЫ").font(.caption.bold()).foregroundStyle(.secondary)
+                            Spacer()
+                            Text("±3").font(.caption2).foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 10).padding(.top, 8)
+
+                        NearbyStrip(lib: lib)
+                            .padding(.horizontal, 8)
+                            .padding(.bottom, 8)
+                    }
+                    .frame(height: 330)
+
+                    if showFilterControls {
+                        Divider()
+                        VStack(alignment: .leading, spacing: 7) {
                             Text("ФИЛЬТРЫ").font(.caption.bold()).foregroundStyle(.secondary)
                             Picker("Оценка", selection: $lib.ratingFilter) {
                                 ForEach(RatingFilter.allCases) { Text($0.rawValue).tag($0) }
@@ -327,75 +339,91 @@ struct ContentView: View {
                             Text("\(lib.filtered.count) из \(lib.items.count)")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
-                            .padding(10)
-                        }
+                        .padding(10)
                     }
-                    .frame(width: 250)
-                    Divider()
+                }
+                .frame(width: 300)
 
-                if let item = lib.current {
-                    VStack(spacing: 0) {
-                        HStack {
-                            Text(item.url.lastPathComponent).font(.headline).lineLimit(1)
-                            Spacer()
+                Divider()
+
+                // Центр: максимально большое фото.
+                VStack(spacing: 0) {
+                    HStack {
+                        Text(lib.current?.url.lastPathComponent ?? "Speed RAW")
+                            .font(.headline).lineLimit(1)
+                        Spacer()
+                        if !lib.filtered.isEmpty {
                             Text("\(lib.index + 1) / \(lib.filtered.count)")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
-                        .padding(.horizontal, 12).padding(.vertical, 8)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 7)
 
-                        ZStack {
-                            Color.black
+                    ZStack {
+                        Color.black
+                        if let item = lib.current {
                             if lib.compareMode {
                                 CompareView(lib: lib)
                             } else {
                                 ZoomablePreview(url: item.url, zoom: $lib.zoom)
                             }
-                        }
-                        .overlay(RoundedRectangle(cornerRadius: 0)
-                            .stroke(lib.selectedIDs.contains(item.id) ? Color.yellow : Color.clear, lineWidth: 4))
-                        .overlay(alignment: .topTrailing) {
-                            PeopleBadge(count: item.peopleCount).padding(10)
+                        } else {
+                            VStack(spacing: 8) {
+                                Text("Speed RAW").font(.largeTitle.bold())
+                                Text("Откройте папку с RAW/JPEG").foregroundStyle(.secondary)
+                            }
                         }
                     }
-                } else {
-                    VStack {
-                        Text("Speed RAW").font(.largeTitle.bold())
-                        Text("Откройте папку с RAW/JPEG").foregroundStyle(.secondary)
+                    .overlay {
+                        if let item = lib.current {
+                            RoundedRectangle(cornerRadius: 0)
+                                .stroke(lib.selectedIDs.contains(item.id) ? Color.yellow : Color.clear, lineWidth: 4)
+                        }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    // Рейтинг теперь непосредственно под главным фото.
+                    if let item = lib.current {
+                        RatingBar(lib: lib, item: item)
+                    }
+
+                    HStack(spacing: 12) {
+                        Text("Выбрано \(lib.selectedCount) из \(lib.items.count) • \(String(format: "%.1f", lib.selectedPercent))%")
+                            .font(.caption.bold())
+                        if let c = lib.current {
+                            Text(c.label.isEmpty ? "Без цвета" : c.label)
+                            Text("Людей: \(c.peopleCount)")
+                        }
+                        Spacer()
+                        Text(lib.status).font(.caption).lineLimit(1)
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 7)
                 }
 
                 Divider()
 
+                // Справа: голова крупным планом + данные файла.
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("ГЛАЗА").font(.caption.bold()).foregroundStyle(.secondary)
-                    EyePreview(crop: lib.eyeCrop, found: lib.eyeFound)
+                    Text("ГОЛОВА").font(.caption.bold()).foregroundStyle(.secondary)
+
+                    HeadPreview(crop: lib.eyeCrop, found: lib.eyeFound)
+                        .frame(maxHeight: 260)
+
                     Divider()
-                    if let item = lib.current { MetadataPanel(item: item) }
+
+                    if let item = lib.current {
+                        MetadataPanel(item: item)
+                    } else {
+                        Text("Данные появятся после открытия папки")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     Spacer()
                 }
                 .padding(12)
-                .frame(width: 285)
+                .frame(width: 300)
                 .background(.regularMaterial)
             }
-
-            Divider()
-            HStack(spacing: 14) {
-                Text("Выбрано: \(lib.selectedCount) / \(lib.items.count) • \(String(format: "%.1f", lib.selectedPercent))%")
-                    .font(.caption.bold())
-                if let c = lib.current {
-                    Text(c.rating > 0 ? String(repeating: "★", count: c.rating) : "—")
-                    Text(c.label.isEmpty ? "Без цвета" : c.label)
-                    Text("Людей: \(c.peopleCount)")
-                }
-                Spacer()
-                Text(lib.status).font(.caption)
-                Spacer()
-                Text("← → • 1–5 оценка • 6–0 цвет • Space fullscreen • ⌘A всё")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            .font(.caption)
-            .padding(8)
         }
         .background(.background)
         .onReceive(NotificationCenter.default.publisher(for: .openFolder)) { _ in lib.openFolder() }
@@ -404,14 +432,18 @@ struct ContentView: View {
 
     private func setupKeyboard() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "a" { lib.selectAll(); return nil }
+            if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "a" {
+                lib.selectAll(); return nil
+            }
             if event.keyCode == 49 { NSApp.keyWindow?.toggleFullScreen(nil); return nil }
             guard NSApp.keyWindow?.firstResponder is NSTextView == false else { return event }
+
             switch event.keyCode {
             case 123: lib.move(-1); return nil
             case 124: lib.move(1); return nil
             default: break
             }
+
             if let s = event.charactersIgnoringModifiers {
                 switch s {
                 case "1": lib.rate(1); return nil
@@ -431,6 +463,114 @@ struct ContentView: View {
             }
             return event
         }
+    }
+}
+
+struct NearbyStrip: View {
+    @ObservedObject var lib: Library
+
+    var body: some View {
+        GeometryReader { geo in
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 5) {
+                    ForEach(neighborItems, id: \.item.id) { entry in
+                        Button {
+                            lib.index = entry.index
+                            lib.zoom = 1
+                            lib.updateEyePreview()
+                        } label: {
+                            ZStack(alignment: .bottomTrailing) {
+                                ImageView(url: entry.item.url)
+                                    .frame(width: max(70, geo.size.width - 4), height: 42)
+                                    .clipped()
+                                    .background(.black)
+
+                                if entry.index == lib.index {
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(Color.accentColor, lineWidth: 3)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .overlay(alignment: .topLeading) {
+                            if entry.index == lib.index {
+                                Text("ТЕКУЩИЙ")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 2)
+                                    .background(.black.opacity(0.75))
+                                    .foregroundStyle(.white)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var neighborItems: [(index: Int, item: PhotoItem)] {
+        guard !lib.filtered.isEmpty else { return [] }
+        let lo = max(0, lib.index - 3)
+        let hi = min(lib.filtered.count - 1, lib.index + 3)
+        return Array(lo...hi).map { ($0, lib.filtered[$0]) }
+    }
+}
+
+struct RatingBar: View {
+    @ObservedObject var lib: Library
+    let item: PhotoItem
+
+    var body: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 3) {
+                ForEach(1...5, id: \.self) { value in
+                    Button {
+                        lib.rate(value)
+                    } label: {
+                        Image(systemName: value <= item.rating ? "star.fill" : "star")
+                            .font(.title3)
+                            .foregroundStyle(value <= item.rating ? .yellow : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Divider().frame(height: 20)
+
+            Button("Без оценки") { lib.clearRating() }
+                .buttonStyle(.borderless)
+
+            Spacer()
+
+            Text(item.label.isEmpty ? "Без цвета" : item.label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.regularMaterial)
+    }
+}
+
+struct HeadPreview: View {
+    let crop: CGImage?
+    let found: Bool
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8).fill(.black)
+            if let crop {
+                Image(decorative: crop, scale: 1)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(6)
+            } else {
+                Text(found ? "Не удалось показать" : "Голова не найдена")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
