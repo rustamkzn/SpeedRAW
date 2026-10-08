@@ -7,7 +7,7 @@ import Vision
 import AVFoundation
 
 let APP_VERSION = "0.2.0"
-let APP_BUILD = 18
+let APP_BUILD = 19
 
 @MainActor
 final class Workspace: ObservableObject, Identifiable {
@@ -100,6 +100,7 @@ final class Library: ObservableObject {
     @Published var exportSettings = ExportSettings()
     @Published var exportStatus = ""
     private var eyeToken = UUID()
+    private var loadGeneration = UUID()
 
     var filtered: [PhotoItem] {
         items.filter { item in
@@ -155,25 +156,63 @@ final class Library: ObservableObject {
     func load(_ folder: URL) {
         currentFolder = folder
         folderName = folder.lastPathComponent
-        status = "Сканирование…"
-        // Build the browser tree in the background so opening a large folder does not freeze the UI.
+        status = "Быстрое сканирование…"
+        items.removeAll(keepingCapacity: true)
+        selectedIDs.removeAll()
+        index = 0
+        compareMode = false
+        eyeCrop = nil
+        eyeFound = false
+
+        let generation = UUID()
+        loadGeneration = generation
+        let exts = Set(["jpg","jpeg","png","heic","heif","cr2","cr3","nef","arw","raf","rw2","orf","dng"])
+
         DispatchQueue.global(qos: .userInitiated).async {
-            let roots = FileBrowser.roots(focus: folder)
-            let exts = Set(["jpg","jpeg","png","heic","heif","cr2","cr3","nef","arw","raf","rw2","orf","dng"])
-            let urls = (FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])?
+            let fm = FileManager.default
+            let urls = (fm.enumerator(at: folder,
+                                      includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+                                      options: [.skipsHiddenFiles])?
                 .compactMap { $0 as? URL }
-                .filter { exts.contains($0.pathExtension.lowercased()) }
-                .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }) ?? []
-            let loaded = urls.map { Metadata.read($0) }
-                .sorted { ($0.captureDate ?? .distantPast, $0.url.path) < ($1.captureDate ?? .distantPast, $1.url.path) }
+                .filter { exts.contains($0.pathExtension.lowercased()) }) ?? []
+
+            let sortedURLs = urls.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+            let lightweight = sortedURLs.map { url -> PhotoItem in
+                PhotoItem(url: url,
+                          rating: XMP.rating(for: url),
+                          label: XMP.label(for: url),
+                          rotation: XMP.rotation(for: url),
+                          orientation: .landscape)
+            }
+
             DispatchQueue.main.async {
-                self.sidebarRoots = roots
-                self.items = loaded
-                self.index = 0
-                self.selectedIDs.removeAll()
-                self.compareMode = false
-                self.status = "\(loaded.count) файлов • сортировка по времени съёмки"
+                guard self.loadGeneration == generation else { return }
+                self.items = lightweight
+                self.status = "(lightweight.count) файлов • превью готовы"
+                self.sidebarRoots = FileBrowser.roots(focus: folder)
                 self.updateEyePreview()
+            }
+
+            // Metadata is intentionally non-blocking.
+            let batchSize = 24
+            for start in stride(from: 0, to: sortedURLs.count, by: batchSize) {
+                let end = min(start + batchSize, sortedURLs.count)
+                let batch = Array(sortedURLs[start..<end]).map { Metadata.read($0) }
+                DispatchQueue.main.async {
+                    guard self.loadGeneration == generation else { return }
+                    for meta in batch {
+                        if let i = self.items.firstIndex(where: { $0.url == meta.url }) {
+                            self.items[i].orientation = meta.orientation
+                            self.items[i].captureDate = meta.captureDate
+                            self.items[i].camera = meta.camera
+                            self.items[i].lens = meta.lens
+                            self.items[i].aperture = meta.aperture
+                            self.items[i].shutter = meta.shutter
+                            self.items[i].iso = meta.iso
+                            self.items[i].flash = meta.flash
+                        }
+                    }
+                }
             }
         }
     }
@@ -198,6 +237,52 @@ final class Library: ObservableObject {
         guard !name.isEmpty else { return }
         try? FileManager.default.createDirectory(at: base.appendingPathComponent(name), withIntermediateDirectories: true)
         sidebarRoots = FileBrowser.roots()
+    }
+
+    func delete(_ item: PhotoItem) {
+        let alert = NSAlert()
+        alert.messageText = "Удалить фото?"
+        alert.informativeText = item.url.lastPathComponent
+        alert.addButton(withTitle: "Удалить")
+        alert.addButton(withTitle: "Отмена")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
+            if let i = items.firstIndex(where: { $0.id == item.id }) {
+                items.remove(at: i)
+                index = min(index, max(0, filtered.count - 1))
+            }
+            status = "Фото перемещено в Корзину"
+        } catch {
+            status = "Ошибка удаления: \(error.localizedDescription)"
+        }
+    }
+
+    func rename(_ item: PhotoItem) {
+        let alert = NSAlert()
+        alert.messageText = "Переименовать фото"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = item.url.deletingPathExtension().lastPathComponent
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Переименовать")
+        alert.addButton(withTitle: "Отмена")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let destination = item.url.deletingLastPathComponent().appendingPathComponent(name).appendingPathExtension(item.url.pathExtension)
+        do {
+            try FileManager.default.moveItem(at: item.url, to: destination)
+            if let i = items.firstIndex(where: { $0.id == item.id }) {
+                items[i] = Metadata.read(destination)
+            }
+            status = "Переименовано: \(destination.lastPathComponent)"
+        } catch {
+            status = "Ошибка переименования: \(error.localizedDescription)"
+        }
+    }
+
+    func showInfo(_ item: PhotoItem) {
+        NSWorkspace.shared.activateFileViewerSelecting([item.url])
     }
 
     func rotateCurrent(clockwise: Bool) {
@@ -242,7 +327,7 @@ final class Library: ObservableObject {
             XMP.write(rating: safe, label: items[i].label, for: items[i].url)
             items[i].rating = safe
         }
-        status = safe == 0 ? "Рейтинг сброшен" : "Рейтинг (safe)★ установлен"
+        status = safe == 0 ? "Рейтинг сброшен" : "Рейтинг \(safe)★ установлен"
         if advance && ids.count == 1 { move(1) }
     }
 
@@ -312,6 +397,17 @@ struct ContentView: View {
             bottomBar(lib: lib)
         }
         .onAppear { if activeID == nil { activeID = workspaces[0].id } }
+        .onDrop(of: [.fileURL, .folder], isTargeted: nil) { providers in
+            guard let provider = providers.first else { return false }
+            provider.loadObject(ofClass: NSURL.self) { object, _ in
+                if let url = object as? URL {
+                    DispatchQueue.main.async { active.lib.load(url) }
+                } else if let nsurl = object as? NSURL, let url = nsurl as URL? {
+                    DispatchQueue.main.async { active.lib.load(url) }
+                }
+            }
+            return true
+        }
         .preferredColorScheme(appearanceScheme)
         .background(Color(nsColor: .windowBackgroundColor))
     }
@@ -397,6 +493,16 @@ struct ContentView: View {
                 Spacer()
                 Button { lib.createFolder() } label: { Image(systemName: "folder.badge.plus") }.buttonStyle(.plain)
             }.padding(8)
+            if let folder = lib.currentFolder {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(folder.pathComponents.indices, id: \.self) { i in
+                            if i > 0 { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary) }
+                            Text(folder.pathComponents[i]).font(.caption2).lineLimit(1)
+                        }
+                    }.padding(.horizontal, 8).padding(.bottom, 6)
+                }
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 1) {
                     ForEach(lib.sidebarRoots) { node in
@@ -471,7 +577,7 @@ struct ContentView: View {
     private func bottomBar(lib: Library) -> some View {
         let percentText = String(format: "%.1f", lib.selectedPercent)
         return HStack(spacing: 12) {
-            Text("Рейтинги: \\(lib.selectedCount) из \\(lib.items.count) • \\(percentText)%")
+            Text("Отобрано: \\(lib.selectedCount) из \\(lib.items.count) • \\(percentText)%")
                 .font(.caption.bold())
             if let c = lib.current {
                 Text(c.label.isEmpty ? "Без цвета" : c.label)
@@ -565,6 +671,30 @@ struct NearbyStrip: View {
                     }
                 }
             }.padding(.vertical, 4)
+        }
+    }
+}
+
+struct PhotoContextMenu: View {
+    let item: PhotoItem
+    @ObservedObject var lib: Library
+
+    var body: some View {
+        Group {
+            Button("Найти исходную папку") {
+                NSWorkspace.shared.selectFile(item.url.path, inFileViewerRootedAtPath: item.url.deletingLastPathComponent().path)
+            }
+            Divider()
+            Button("Удалить фото", role: .destructive) {
+                lib.delete(item)
+            }
+            Button("Переименовать фото…") {
+                lib.rename(item)
+            }
+            Divider()
+            Button("Информация") {
+                lib.showInfo(item)
+            }
         }
     }
 }
