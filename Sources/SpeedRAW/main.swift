@@ -222,6 +222,13 @@ final class Library: ObservableObject {
         }
     }
 
+    func move(_ delta: Int) {
+        guard !filtered.isEmpty else { return }
+        index = min(max(index + delta, 0), filtered.count - 1)
+        zoom = 1
+        updateEyePreview()
+    }
+
     func rate(_ value: Int) {
         guard let current else { return }
         setRating(value, for: [current.id], advance: autoAdvance)
@@ -242,7 +249,7 @@ final class Library: ObservableObject {
         let ids = selectedIDs.isEmpty ? filtered.map(\.id) : Array(selectedIDs)
         guard !ids.isEmpty else { return }
         setRating(value, for: ids, advance: false)
-        status = "Рейтинг (value)★ присвоен (ids.count) фото"
+        status = "Рейтинг \\(value)★ присвоен \\(ids.count) фото"
     }
 
     func clearRating() {
@@ -256,7 +263,7 @@ final class Library: ObservableObject {
         } else {
             selectedIDs.formUnion(ids)
         }
-        status = "Выбрано (selectedIDs.count) фото"
+        status = "Выбрано \\(selectedIDs.count) фото"
     }
 }
 
@@ -403,7 +410,8 @@ struct ContentView: View {
                     if lib.compareMode {
                         CompareView(lib: lib)
                     } else {
-                        ZoomablePreview(url: item.url, rotation: item.rotation, zoom: $lib.zoom)
+                        ZoomablePreview(url: item.url, rotation: item.rotation,
+                                         zoom: Binding(get: { lib.zoom }, set: { lib.zoom = $0 }))
                     }
                 } else {
                     VStack(spacing: 8) {
@@ -498,10 +506,10 @@ struct NearbyStrip: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
             LazyVStack(spacing: 6) {
-                ForEach(Array(lib.filtered.enumerated()), id: \.element.id) { entry in
-                    let item = entry.element
+                ForEach(lib.filtered.indices, id: \.self) { idx in
+                    let item = lib.filtered[idx]
                     Button {
-                        lib.index = entry.offset
+                        lib.index = idx
                         lib.zoom = 1
                         lib.updateEyePreview()
                     } label: {
@@ -519,7 +527,7 @@ struct NearbyStrip: View {
                             .padding(.horizontal, 5).padding(.vertical, 3)
                             .background(.black.opacity(0.7)).clipShape(Capsule())
                             .padding(.bottom, 4)
-                            if entry.offset == lib.index {
+                            if idx == lib.index {
                                 RoundedRectangle(cornerRadius: 5).stroke(Color.accentColor, lineWidth: 3)
                             }
                         }
@@ -638,6 +646,110 @@ final class ZoomNSView: NSView {
         anchor = CGPoint(x: max(0, min(1, p.x / max(bounds.width, 1))), y: max(0, min(1, p.y / max(bounds.height, 1))))
         let factor: CGFloat = event.scrollingDeltaY > 0 ? 1.12 : 0.89
         zoom = min(8, max(1, zoom * factor)); onZoom?(zoom); needsDisplay = true
+    }
+}
+
+struct HeadPreview: View {
+    let crop: CGImage?
+    let found: Bool
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8).fill(.black)
+            if let crop {
+                Image(decorative: crop, scale: 1).resizable().scaledToFit().padding(6)
+            } else {
+                Text(found ? "Не удалось показать" : "Голова не найдена")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }.clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct CompareView: View {
+    @ObservedObject var lib: Library
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(lib.compareItems) { item in
+                VStack(spacing: 0) {
+                    Text(item.url.lastPathComponent).font(.caption).foregroundStyle(.white).padding(4)
+                    ImageView(url: item.url).frame(maxWidth: .infinity, maxHeight: .infinity).background(.black)
+                }
+            }
+        }.background(.black)
+    }
+}
+
+struct ImageView: View {
+    let url: URL
+    var body: some View {
+        if let image = NSImage(contentsOf: url) {
+            Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+        } else {
+            Image(systemName: "photo").font(.system(size: 60)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+struct CachedThumb: View {
+    let url: URL
+    @State private var image: NSImage?
+
+    var body: some View {
+        ZStack {
+            Color.black
+            if let image {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .task(id: url) {
+            await withCheckedContinuation { continuation in
+                PreviewLoader.load(url: url) { img in
+                    DispatchQueue.main.async {
+                        image = img
+                        continuation.resume()
+                    }
+                }
+            }
+        }
+    }
+}
+
+enum PreviewLoader {
+    private static let cache = NSCache<NSURL, NSImage>()
+
+    static func load(url: URL, completion: @escaping (NSImage?) -> Void) {
+        if let cached = cache.object(forKey: url as NSURL) {
+            completion(cached)
+            return
+        }
+
+        let request = QLThumbnailGenerator.Request(
+            fileAt: url,
+            size: CGSize(width: 1800, height: 1800),
+            scale: NSScreen.main?.backingScaleFactor ?? 2,
+            representationTypes: .thumbnail
+        )
+
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
+            if let representation {
+                let image = NSImage(
+                    cgImage: representation.cgImage,
+                    size: representation.contentRect.size
+                )
+                cache.setObject(image, forKey: url as NSURL)
+                completion(image)
+                return
+            }
+
+            // Last-resort fallback for formats Quick Look cannot thumbnail.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let image = NSImage(contentsOf: url)
+                if let image { cache.setObject(image, forKey: url as NSURL) }
+                completion(image)
+            }
+        }
     }
 }
 
