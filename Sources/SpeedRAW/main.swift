@@ -7,7 +7,7 @@ import Vision
 import AVFoundation
 
 let APP_VERSION = "0.2.0"
-let APP_BUILD = 20
+let APP_BUILD = 21
 
 @MainActor
 final class Workspace: ObservableObject, Identifiable {
@@ -451,7 +451,6 @@ final class Library: ObservableObject {
 struct ContentView: View {
     @State private var workspaces: [Workspace] = [Workspace()]
     @State private var activeID: UUID?
-    @AppStorage("speedraw.appearance") private var appearanceRaw = "system"
 
     private var active: Workspace {
         if let id = activeID, let found = workspaces.first(where: { $0.id == id }) { return found }
@@ -481,12 +480,7 @@ struct ContentView: View {
             }
             return true
         }
-        .preferredColorScheme(appearanceScheme)
         .background(Color(nsColor: .windowBackgroundColor))
-    }
-
-    private var appearanceScheme: ColorScheme? {
-        appearanceRaw == "dark" ? .dark : appearanceRaw == "light" ? .light : nil
     }
 
     private func topBar(lib: Library) -> some View {
@@ -498,9 +492,6 @@ struct ContentView: View {
             Text(lib.folderName).font(.headline).lineLimit(1)
             Spacer()
             Toggle("Автопереход", isOn: Binding(get: { lib.autoAdvance }, set: { lib.autoAdvance = $0 }))
-            Button { appearanceRaw = appearanceRaw == "dark" ? "light" : "dark" } label: {
-                Image(systemName: appearanceRaw == "dark" ? "sun.max" : "moon")
-            }.buttonStyle(.plain).help("Светлая / тёмная тема")
             Button(lib.compareItems.count == 2 ? "Сравнить" : "Выбрать 2 фото") { lib.toggleCompare() }
                 .disabled(lib.compareItems.count != 2)
             Text("v\(APP_VERSION) • build \(APP_BUILD)").font(.caption2).foregroundStyle(.secondary)
