@@ -139,8 +139,8 @@ final class Library: ObservableObject {
     }
     // In culling mode a photo becomes "selected" as soon as it receives a rating.
     // Explicit selection remains available for compare/Select actions.
-    var selectedCount: Int { items.reduce(0) { $0 + ($1.rating > 0 ? 1 : 0) } }
-    var selectedPercent: Double { items.isEmpty ? 0 : Double(selectedCount) / Double(items.count) * 100 }
+    var selectedCount: Int { items.filter { $0.rating > 0 }.count }
+    var selectedPercent: Double { guard !items.isEmpty else { return 0 }; return (Double(selectedCount) / Double(items.count)) * 100.0 }
     var compareItems: [PhotoItem] { Array(filtered.filter { selectedIDs.contains($0.id) }.prefix(2)) }
 
     func openFolder() {
@@ -282,7 +282,22 @@ final class Library: ObservableObject {
     }
 
     func showInfo(_ item: PhotoItem) {
-        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+        let keys: Set<URLResourceKey> = [.fileSizeKey, .creationDateKey, .contentModificationDateKey, .typeIdentifierKey]
+        let values = try? item.url.resourceValues(forKeys: keys)
+        let size = ByteCountFormatter.string(fromByteCount: Int64(values?.fileSize ?? 0), countStyle: .file)
+        let type = values?.typeIdentifier ?? item.url.pathExtension.uppercased()
+        let alert = NSAlert()
+        alert.messageText = item.url.lastPathComponent
+        alert.informativeText = """
+        Путь: (item.url.path)
+        Размер: (size)
+        Тип: (type)
+        Рейтинг: (item.rating)★
+        Камера: (item.camera.isEmpty ? "—" : item.camera)
+        Объектив: (item.lens.isEmpty ? "—" : item.lens)
+        """
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     func rotateCurrent(clockwise: Bool) {
@@ -498,7 +513,7 @@ struct ContentView: View {
                     HStack(spacing: 4) {
                         ForEach(folder.pathComponents.indices, id: \.self) { i in
                             if i > 0 { Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary) }
-                            Text(folder.pathComponents[i]).font(.caption2).lineLimit(1)
+                            Text(folder.pathComponents[i]).font(.caption2).lineLimit(1).foregroundStyle(.primary)
                         }
                     }.padding(.horizontal, 8).padding(.bottom, 6)
                 }
@@ -932,6 +947,7 @@ struct FolderRow: View {
                 }
                 Image(systemName: node.url.path == "/" ? "internaldrive" : "folder")
                 Text(node.url.lastPathComponent.isEmpty ? node.url.path : node.url.lastPathComponent)
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
             }
             .padding(.leading, CGFloat(depth * 14))
