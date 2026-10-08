@@ -1,0 +1,51 @@
+name: Build Speed RAW
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build release
+        run: swift build -c release
+
+      - name: Create app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="Speed RAW.app"
+          rm -rf "$APP" "SpeedRAW-dmg"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp ".build/release/SpeedRAW" "$APP/Contents/MacOS/SpeedRAW"
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleDisplayName</key><string>Speed RAW</string>
+          <key>CFBundleExecutable</key><string>SpeedRAW</string>
+          <key>CFBundleIdentifier</key><string>com.rustamkzn.speedraw</string>
+          <key>CFBundleName</key><string>Speed RAW</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>CFBundleShortVersionString</key><string>0.1.0</string>
+          <key>CFBundleVersion</key><string>1</string>
+          <key>LSMinimumSystemVersion</key><string>14.0</string>
+          <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          codesign --force --deep --sign - "$APP"
+          mkdir -p SpeedRAW-dmg
+          cp -R "$APP" SpeedRAW-dmg/
+          hdiutil create -volname "Speed RAW" -srcfolder SpeedRAW-dmg -ov -format UDZO "Speed-RAW-0.1.0.dmg"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Speed-RAW-macOS
+          path: Speed-RAW-0.1.0.dmg
+          if-no-files-found: error
