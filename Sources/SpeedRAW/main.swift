@@ -124,7 +124,9 @@ final class Library: ObservableObject {
         guard !filtered.isEmpty, index >= 0, index < filtered.count else { return nil }
         return filtered[index]
     }
-    var selectedCount: Int { selectedIDs.count }
+    // In culling mode a photo becomes "selected" as soon as it receives a rating.
+    // Explicit selection remains available for compare/Select actions.
+    var selectedCount: Int { items.reduce(0) { $0 + ($1.rating > 0 ? 1 : 0) } }
     var selectedPercent: Double { items.isEmpty ? 0 : Double(selectedCount) / Double(items.count) * 100 }
     var compareItems: [PhotoItem] { Array(filtered.filter { selectedIDs.contains($0.id) }.prefix(2)) }
 
@@ -258,7 +260,7 @@ final class Library: ObservableObject {
 
 struct ContentView: View {
     @StateObject private var lib = Library()
-    @State private var showFilters = true
+    @State private var showFilterControls = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -280,15 +282,14 @@ struct ContentView: View {
                 Button(lib.compareItems.count == 2 ? "Сравнить" : "Выбрать 2 фото"){lib.toggleCompare()}.disabled(lib.compareItems.count != 2)
                 Button(lib.selectedIDs.contains(lib.current?.id ?? UUID()) ? "Снять выбор" : "Выбрать"){lib.toggleSelected()}.disabled(lib.current == nil)
                 Toggle("Автопереход", isOn: $lib.autoAdvance)
-                Button(showFilters ? "Скрыть фильтры" : "Фильтры") { showFilters.toggle() }
+                Button(showFilterControls ? "Скрыть фильтры" : "Фильтры") { showFilterControls.toggle() }
             }
             .padding(12)
 
             Divider()
 
             HStack(spacing: 0) {
-                if showFilters {
-                    VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 0) {
                         HStack {
                             Text("ПАПКИ И ДИСКИ").font(.caption.bold()).foregroundStyle(.secondary)
                             Spacer()
@@ -309,9 +310,10 @@ struct ContentView: View {
                             .padding(.vertical, 5)
                         }
 
-                        Divider().padding(.top, 5)
+                        if showFilterControls {
+                            Divider().padding(.top, 5)
 
-                        VStack(alignment: .leading, spacing: 7) {
+                            VStack(alignment: .leading, spacing: 7) {
                             Text("ФИЛЬТРЫ").font(.caption.bold()).foregroundStyle(.secondary)
                             Picker("Оценка", selection: $lib.ratingFilter) {
                                 ForEach(RatingFilter.allCases) { Text($0.rawValue).tag($0) }
@@ -325,11 +327,11 @@ struct ContentView: View {
                             Text("\(lib.filtered.count) из \(lib.items.count)")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
-                        .padding(10)
+                            .padding(10)
+                        }
                     }
                     .frame(width: 250)
                     Divider()
-                }
 
                 if let item = lib.current {
                     VStack(spacing: 0) {
@@ -492,8 +494,8 @@ final class ZoomNSView: NSView {
         image = nil
         needsDisplay = true
 
-        // CR3 files often do not decode through NSImage(contentsOf:).
-        // Prefer Quick Look's embedded RAW preview, then fall back to ImageIO/NSImage.
+        // Use Quick Look's embedded RAW preview first. This is much faster for CR3
+        // than asking NSImage to fully decode the RAW on every frame.
         PreviewLoader.load(url: url) { [weak self] image in
             DispatchQueue.main.async {
                 guard let self, self.loadToken == token else { return }
@@ -537,26 +539,37 @@ final class ZoomNSView: NSView {
 }
 
 enum PreviewLoader {
+    private static let cache = NSCache<NSURL, NSImage>()
+
     static func load(url: URL, completion: @escaping (NSImage?) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            if let image = NSImage(contentsOf: url) {
+        if let cached = cache.object(forKey: url as NSURL) {
+            completion(cached)
+            return
+        }
+
+        let request = QLThumbnailGenerator.Request(
+            fileAt: url,
+            size: CGSize(width: 1800, height: 1800),
+            scale: NSScreen.main?.backingScaleFactor ?? 2,
+            representationTypes: .thumbnail
+        )
+
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
+            if let representation {
+                let image = NSImage(
+                    cgImage: representation.cgImage,
+                    size: representation.contentRect.size
+                )
+                cache.setObject(image, forKey: url as NSURL)
                 completion(image)
                 return
             }
 
-            let size = CGSize(width: 2600, height: 2600)
-            let request = QLThumbnailGenerator.Request(
-                fileAt: url,
-                size: size,
-                scale: NSScreen.main?.backingScaleFactor ?? 2,
-                representationTypes: .thumbnail
-            )
-            QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, error in
-                if let representation {
-                    completion(NSImage(cgImage: representation.cgImage, size: representation.contentRect.size))
-                } else {
-                    completion(nil)
-                }
+            // Last-resort fallback for formats Quick Look cannot thumbnail.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let image = NSImage(contentsOf: url)
+                if let image { cache.setObject(image, forKey: url as NSURL) }
+                completion(image)
             }
         }
     }
@@ -748,13 +761,24 @@ enum VisionAnalysis {
         let request = VNDetectFaceLandmarksRequest()
         try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
         guard let face = request.results?.first else { return EyeResult(crop: nil, found: false) }
+
+        // "ГЛАЗА" is intentionally a head/face preview now: Vision can return
+        // a landmark box slightly off the eyes, especially on profile faces.
+        // Showing the whole head gives a reliable view of expression and eyes.
         let b = face.boundingBox
         let w = CGFloat(image.width), h = CGFloat(image.height)
         let faceRect = CGRect(x: b.minX * w, y: b.minY * h, width: b.width * w, height: b.height * h)
-        let eyes = CGRect(x: faceRect.minX, y: faceRect.minY + faceRect.height * 0.32,
-                          width: faceRect.width, height: faceRect.height * 0.40)
-            .intersection(CGRect(x: 0, y: 0, width: w, height: h))
-        return EyeResult(crop: image.cropping(to: eyes), found: true)
+
+        let paddingX = faceRect.width * 0.45
+        let paddingY = faceRect.height * 0.55
+        let headRect = CGRect(
+            x: faceRect.minX - paddingX,
+            y: faceRect.minY - paddingY * 0.35,
+            width: faceRect.width + paddingX * 2,
+            height: faceRect.height + paddingY * 1.35
+        ).intersection(CGRect(x: 0, y: 0, width: w, height: h))
+
+        return EyeResult(crop: image.cropping(to: headRect), found: true)
     }
 }
 
