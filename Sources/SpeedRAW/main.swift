@@ -567,7 +567,7 @@ struct ContentView: View {
                 .background(store.activeID == ws.id ? Color(nsColor: .controlBackgroundColor) : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 7))
                 .contentShape(Rectangle())
-                .onTapGesture { activeID = ws.id }
+                .onTapGesture { store.activeID = ws.id }
             }
             Button {
                 store.addWorkspace()
