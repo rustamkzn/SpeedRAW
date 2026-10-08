@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import AppKit
 import UniformTypeIdentifiers
 import ImageIO
@@ -7,13 +8,67 @@ import Vision
 import AVFoundation
 
 let APP_VERSION = "0.2.0"
-let APP_BUILD = 21
+let APP_BUILD = 22
 
 @MainActor
 final class Workspace: ObservableObject, Identifiable {
     let id = UUID()
     let lib = Library()
     @Published var title = "Новая вкладка"
+}
+
+@MainActor
+final class WorkspaceStore: ObservableObject {
+    @Published var workspaces: [Workspace] = []
+    @Published var activeID: UUID?
+    private var libraryObservers: [UUID: AnyCancellable] = [:]
+
+    init() {
+        let first = Workspace()
+        workspaces = [first]
+        activeID = first.id
+        observe(first)
+    }
+
+    var active: Workspace {
+        if let activeID, let found = workspaces.first(where: { $0.id == activeID }) {
+            return found
+        }
+        return workspaces[0]
+    }
+
+    func addWorkspace() {
+        let ws = Workspace()
+        observe(ws)
+        workspaces.append(ws)
+        store.activeID = ws.id
+    }
+
+    func closeWorkspace(_ ws: Workspace) {
+        guard workspaces.count > 1 else {
+            ws.lib.items.removeAll()
+            ws.lib.currentFolder = nil
+            ws.lib.folderName = "Папка не открыта"
+            ws.lib.sidebarRoots.removeAll()
+            ws.lib.index = 0
+            return
+        }
+
+        let idx = workspaces.firstIndex(where: { $0.id == ws.id }) ?? 0
+        libraryObservers[ws.id] = nil
+        workspaces.remove(at: idx)
+
+        if store.activeID == ws.id {
+            activeID = workspaces[min(idx, workspaces.count - 1)].id
+        }
+    }
+
+    private func observe(_ ws: Workspace) {
+        libraryObservers[ws.id] = ws.lib.objectWillChange.sink { [weak self] _ in
+            guard let self else { return }
+            self.objectWillChange.send()
+        }
+    }
 }
 
 @main
@@ -449,12 +504,12 @@ final class Library: ObservableObject {
 }
 
 struct ContentView: View {
-    @State private var workspaces: [Workspace] = [Workspace()]
-    @State private var activeID: UUID?
+    @StateObject private var store = WorkspaceStore()
+
+    private var workspaces: [Workspace] { store.workspaces }
 
     private var active: Workspace {
-        if let id = activeID, let found = workspaces.first(where: { $0.id == id }) { return found }
-        return workspaces[0]
+        store.active
     }
 
     var body: some View {
@@ -468,7 +523,7 @@ struct ContentView: View {
             Divider()
             bottomBar(lib: lib)
         }
-        .onAppear { if activeID == nil { activeID = workspaces[0].id } }
+        .onAppear { if store.activeID == nil { store.activeID = workspaces[0].id } }
         .onDrop(of: [.fileURL, .folder], isTargeted: nil) { providers in
             guard let provider = providers.first else { return false }
             provider.loadObject(ofClass: NSURL.self) { object, _ in
@@ -509,15 +564,13 @@ struct ContentView: View {
                     Button { closeWorkspace(ws) } label: { Image(systemName: "xmark").font(.caption2) }.buttonStyle(.plain)
                 }
                 .padding(.horizontal, 10).frame(height: 32)
-                .background(activeID == ws.id ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+                .background(store.activeID == ws.id ? Color(nsColor: .controlBackgroundColor) : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 7))
                 .contentShape(Rectangle())
                 .onTapGesture { activeID = ws.id }
             }
             Button {
-                let ws = Workspace()
-                workspaces.append(ws)
-                activeID = ws.id
+                store.addWorkspace()
             } label: { Image(systemName: "plus") }
             .buttonStyle(.plain).padding(.horizontal, 8)
             Spacer()
@@ -526,15 +579,7 @@ struct ContentView: View {
     }
 
     private func closeWorkspace(_ ws: Workspace) {
-        guard workspaces.count > 1 else {
-            ws.lib.items.removeAll()
-            ws.lib.currentFolder = nil
-            ws.lib.folderName = "Папка не открыта"
-            return
-        }
-        let idx = workspaces.firstIndex(where: { $0.id == ws.id })!
-        workspaces.remove(at: idx)
-        if activeID == ws.id { activeID = workspaces[min(idx, workspaces.count - 1)].id }
+        store.closeWorkspace(ws)
     }
 
     private func workspace(lib: Library) -> some View {
