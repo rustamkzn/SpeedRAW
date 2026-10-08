@@ -1,4 +1,4 @@
-name: Build Speed RAW
+name: Build Speed RAW # v0.1
 
 on:
   push:
