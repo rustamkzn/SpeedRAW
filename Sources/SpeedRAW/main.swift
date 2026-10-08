@@ -3,6 +3,7 @@ import AppKit
 import UniformTypeIdentifiers
 import ImageIO
 import Vision
+import AVFoundation
 
 @main
 struct SpeedRAWApp: App {
@@ -30,6 +31,14 @@ struct PhotoItem: Identifiable, Hashable {
     var rating: Int = 0
     var label: String = ""
     var orientation: OrientationFilter = .landscape
+    var captureDate: Date?
+    var camera: String = ""
+    var lens: String = ""
+    var aperture: String = ""
+    var shutter: String = ""
+    var iso: String = ""
+    var flash: String = "Без вспышки"
+    var peopleCount: Int = 0
 }
 
 enum RatingFilter: String, CaseIterable, Identifiable {
@@ -72,6 +81,10 @@ final class Library: ObservableObject {
     @Published var selectedIDs: Set<UUID> = []
     @Published var compareMode = false
     @Published var zoom: CGFloat = 1
+    @Published var currentFolder: URL?
+    @Published var sidebarRoots: [FolderNode] = []
+    @Published var eyeCrop: CGImage?
+    @Published var eyeFound = false
 
     var filtered: [PhotoItem] {
         items.filter { item in
@@ -123,23 +136,49 @@ final class Library: ObservableObject {
     }
 
     func load(_ folder: URL) {
+        currentFolder = folder
         folderName = folder.lastPathComponent
         status = "Сканирование…"
+        sidebarRoots = FileBrowser.roots()
         DispatchQueue.global(qos: .userInitiated).async {
             let exts = Set(["jpg","jpeg","png","heic","heif","cr2","cr3","nef","arw","raf","rw2","orf","dng"])
             let urls = (FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])?
                 .compactMap { $0 as? URL }
                 .filter { exts.contains($0.pathExtension.lowercased()) }
                 .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }) ?? []
-            let loaded = urls.map { url in PhotoItem(url: url, rating: XMP.rating(for: url), label: XMP.label(for: url), orientation: ImageInfo.orientation(for: url)) }
+            let loaded = urls.map { Metadata.read($0) }
+                .sorted { ($0.captureDate ?? .distantPast, $0.url.path) < ($1.captureDate ?? .distantPast, $1.url.path) }
             DispatchQueue.main.async {
                 self.items = loaded
                 self.index = 0
                 self.selectedIDs.removeAll()
                 self.compareMode = false
-                self.status = "\\(loaded.count) файлов"
+                self.status = "\(loaded.count) файлов • сортировка по времени съёмки"
+                self.updateEyePreview()
             }
         }
+    }
+
+    func loadFromSidebar(_ url: URL) {
+        guard url.hasDirectoryPath else { return }
+        load(url)
+    }
+
+    func createFolder() {
+        guard let base = currentFolder else { return }
+        let alert = NSAlert()
+        alert.messageText = "Новая папка"
+        alert.informativeText = "Введите название:"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = "Новая папка"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Создать")
+        alert.addButton(withTitle: "Отмена")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        try? FileManager.default.createDirectory(at: base.appendingPathComponent(name), withIntermediateDirectories: true)
+        sidebarRoots = FileBrowser.roots()
     }
 
     func rate(_ value: Int) {
@@ -164,11 +203,23 @@ final class Library: ObservableObject {
         guard !filtered.isEmpty else { return }
         index = min(max(index + delta, 0), filtered.count - 1)
         zoom = 1
+        updateEyePreview()
     }
 
     func toggleSelected() { guard let c=current else{return}; if selectedIDs.contains(c.id){selectedIDs.remove(c.id)}else{selectedIDs.insert(c.id)} }
     func selectAll() { selectedIDs.formUnion(filtered.map{$0.id}); status="Выбрано \(selectedCount) из \(items.count)" }
     func toggleCompare() { compareMode = compareItems.count == 2 }
+
+    func updateEyePreview() {
+        guard let current else { eyeCrop = nil; eyeFound = false; return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = VisionAnalysis.eyeCrop(for: current.url)
+            DispatchQueue.main.async {
+                self.eyeCrop = result.crop
+                self.eyeFound = result.found
+            }
+        }
+    }
 
     func clearRating() {
         guard let current, let i = items.firstIndex(where: { $0.id == current.id }) else { return }
@@ -184,7 +235,7 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button("Открыть папку") { lib.openFolder() }
+                Button { lib.openFolder() } label: { Label("Открыть папку", systemImage: "folder") }
                     .keyboardShortcut("o", modifiers: [.command])
                 Text(lib.folderName).font(.headline).lineLimit(1)
                 Spacer()
@@ -199,69 +250,107 @@ struct ContentView: View {
 
             HStack(spacing: 0) {
                 if showFilters {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("ОЦЕНКА").font(.caption).foregroundStyle(.secondary)
-                        Picker("", selection: $lib.ratingFilter) {
-                            ForEach(RatingFilter.allCases) { Text($0.rawValue).tag($0) }
-                        }.labelsHidden().pickerStyle(.menu)
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack {
+                            Text("ПАПКИ И ДИСКИ").font(.caption.bold()).foregroundStyle(.secondary)
+                            Spacer()
+                            Button { lib.createFolder() } label: {
+                                Image(systemName: "folder.badge.plus")
+                            }
+                            .buttonStyle(.plain)
+                            .help("Создать папку в открытой папке")
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 8)
 
-                        Text("ЦВЕТ").font(.caption).foregroundStyle(.secondary)
-                        Picker("", selection: $lib.colorFilter) {
-                            ForEach(ColorFilter.allCases) { Text($0.rawValue).tag($0) }
-                        }.labelsHidden().pickerStyle(.menu)
-                        Text("ОРИЕНТАЦИЯ").font(.caption).foregroundStyle(.secondary)
-                        Picker("", selection: $lib.orientationFilter) { ForEach(OrientationFilter.allCases) { Text($0.rawValue).tag($0) } }.labelsHidden().pickerStyle(.menu)
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 1) {
+                                ForEach(lib.sidebarRoots) { node in
+                                    FolderRow(node: node, depth: 0) { lib.loadFromSidebar($0) }
+                                }
+                            }
+                            .padding(.vertical, 5)
+                        }
 
-                        Spacer()
-                        Text("\(lib.filtered.count) из \(lib.items.count)")
-                            .font(.caption).foregroundStyle(.secondary)
+                        Divider().padding(.top, 5)
+
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("ФИЛЬТРЫ").font(.caption.bold()).foregroundStyle(.secondary)
+                            Picker("Оценка", selection: $lib.ratingFilter) {
+                                ForEach(RatingFilter.allCases) { Text($0.rawValue).tag($0) }
+                            }.pickerStyle(.menu)
+                            Picker("Цвет", selection: $lib.colorFilter) {
+                                ForEach(ColorFilter.allCases) { Text($0.rawValue).tag($0) }
+                            }.pickerStyle(.menu)
+                            Picker("Ориентация", selection: $lib.orientationFilter) {
+                                ForEach(OrientationFilter.allCases) { Text($0.rawValue).tag($0) }
+                            }.pickerStyle(.menu)
+                            Text("\(lib.filtered.count) из \(lib.items.count)")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        .padding(10)
                     }
-                    .padding(14)
-                    .frame(width: 190)
+                    .frame(width: 250)
                     Divider()
                 }
 
-                ZStack {
-                    Color.black.opacity(0.96)
-                    if lib.compareMode { CompareView(lib: lib) } else if let item = lib.current {
-                        ZoomImage(url: item.url, zoom: $lib.zoom)
-                            .id(item.url)
-                            .padding(20)
-                    } else {
-                        VStack(spacing: 10) {
-                            Text("Speed RAW").font(.largeTitle.bold()).foregroundStyle(.white)
-                            Text("Откройте папку с RAW/JPEG")
-                                .foregroundStyle(.white.opacity(0.65))
+                if let item = lib.current {
+                    VStack(spacing: 0) {
+                        HStack {
+                            Text(item.url.lastPathComponent).font(.headline).lineLimit(1)
+                            Spacer()
+                            Text("\(lib.index + 1) / \(lib.filtered.count)")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+
+                        ZStack {
+                            Color.black
+                            if lib.compareMode {
+                                CompareView(lib: lib)
+                            } else {
+                                ZoomablePreview(url: item.url, zoom: $lib.zoom)
+                            }
+                        }
+                        .overlay(alignment: .topTrailing) {
+                            PeopleBadge(count: item.peopleCount).padding(10)
                         }
                     }
-                }
-                .overlay(alignment: .bottom) {
-                    HStack {
-                        Text(lib.current?.url.lastPathComponent ?? "")
-                            .lineLimit(1)
-                        Spacer()
-                        if let c = lib.current {
-                            Text(c.rating > 0 ? String(repeating: "★", count: c.rating) : "—")
-                            Text(c.label.isEmpty ? "Без цвета" : c.label)
-                        }
+                } else {
+                    VStack {
+                        Text("Speed RAW").font(.largeTitle.bold())
+                        Text("Откройте папку с RAW/JPEG").foregroundStyle(.secondary)
                     }
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(10)
-                    .background(.black.opacity(0.65))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .onTapGesture {
-                    lib.move(1)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("ГЛАЗА").font(.caption.bold()).foregroundStyle(.secondary)
+                    EyePreview(crop: lib.eyeCrop, found: lib.eyeFound)
+                    Divider()
+                    if let item = lib.current { MetadataPanel(item: item) }
+                    Spacer()
                 }
+                .padding(12)
+                .frame(width: 285)
+                .background(.regularMaterial)
             }
 
             Divider()
-            HStack {
+            HStack(spacing: 14) {
                 Text("Выбрано: \(lib.selectedCount) / \(lib.items.count) • \(String(format: "%.1f", lib.selectedPercent))%")
+                    .font(.caption.bold())
+                if let c = lib.current {
+                    Text(c.rating > 0 ? String(repeating: "★", count: c.rating) : "—")
+                    Text(c.label.isEmpty ? "Без цвета" : c.label)
+                    Text("Людей: \(c.peopleCount)")
+                }
                 Spacer()
-                Text(lib.status)
+                Text(lib.status).font(.caption)
                 Spacer()
-                Text("← → навигация   •   1–5 оценка   •   6–0 цвет")
+                Text("← → • 1–5 оценка • 6–0 цвет • Space fullscreen • ⌘A всё")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             .font(.caption)
             .padding(8)
@@ -322,9 +411,77 @@ struct ImageView: View {
 }
 
 struct CompareView: View { @ObservedObject var lib: Library; var body: some View { HStack(spacing:2) { ForEach(lib.compareItems) { item in ImageView(url:item.url).frame(maxWidth:.infinity,maxHeight:.infinity).background(.black) } }.background(.black) } }
-struct ZoomImage: View { let url:URL; @Binding var zoom:CGFloat; @State private var focus=UnitPoint.center; var body:some View { GeometryReader { geo in if let image=NSImage(contentsOf:url) { Image(nsImage:image).resizable().aspectRatio(contentMode:.fit).scaleEffect(zoom,anchor:focus).frame(width:geo.size.width,height:geo.size.height).clipped().onAppear{focus=VisionFocus.point(for:image)} } } } }
-enum ImageInfo { static func orientation(for url:URL)->OrientationFilter { guard let s=CGImageSourceCreateWithURL(url as CFURL,nil),let p=CGImageSourceCopyPropertiesAtIndex(s,0,nil) as? [CFString:Any],let w=p[kCGImagePropertyPixelWidth] as? CGFloat,let h=p[kCGImagePropertyPixelHeight] as? CGFloat else{return .landscape}; return h>w ? .portrait : .landscape } }
-enum VisionFocus { static func point(for image:NSImage)->UnitPoint { guard let cg=image.cgImage(forProposedRect:nil,context:nil,hints:nil) else{return .center}; let q=VNDetectFaceLandmarksRequest(); try? VNImageRequestHandler(cgImage:cg,options:[:]).perform([q]); guard let f=q.results?.first,let l=f.landmarks?.leftEye?.normalizedPoints,let r=f.landmarks?.rightEye?.normalizedPoints else{return .center}; let a=l.reduce(CGPoint.zero){CGPoint(x:$0.x+$1.x,y:$0.y+$1.y)},b=r.reduce(CGPoint.zero){CGPoint(x:$0.x+$1.x,y:$0.y+$1.y)}; return UnitPoint(x:(a.x/CGFloat(l.count)+b.x/CGFloat(r.count))/2,y:1-(a.y/CGFloat(l.count)+b.y/CGFloat(r.count))/2) } }
+struct CompareView: View {
+    @ObservedObject var lib: Library
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(lib.compareItems) { item in
+                VStack(spacing: 0) {
+                    Text(item.url.lastPathComponent).font(.caption).foregroundStyle(.white).padding(4)
+                    ImageView(url: item.url).frame(maxWidth: .infinity, maxHeight: .infinity).background(.black)
+                }
+            }
+        }.background(.black)
+    }
+}
+
+struct ImageView: View {
+    let url: URL
+    var body: some View {
+        if let image = NSImage(contentsOf: url) {
+            Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+        } else {
+            Image(systemName: "photo").font(.system(size: 60)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+struct ZoomablePreview: NSViewRepresentable {
+    let url: URL
+    @Binding var zoom: CGFloat
+
+    func makeNSView(context: Context) -> ZoomNSView { ZoomNSView() }
+
+    func updateNSView(_ nsView: ZoomNSView, context: Context) {
+        nsView.image = NSImage(contentsOf: url)
+        nsView.zoom = zoom
+        nsView.onZoom = { value in
+            DispatchQueue.main.async { self.zoom = value }
+        }
+        nsView.needsDisplay = true
+    }
+}
+
+final class ZoomNSView: NSView {
+    var image: NSImage?
+    var zoom: CGFloat = 1
+    var onZoom: ((CGFloat) -> Void)?
+    private var anchor = CGPoint(x: 0.5, y: 0.5)
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let image else { NSColor.black.setFill(); dirtyRect.fill(); return }
+        NSColor.black.setFill()
+        dirtyRect.fill()
+
+        let base = AVMakeRect(aspectRatio: image.size, insideRect: bounds)
+        let w = base.width * zoom
+        let h = base.height * zoom
+        let x = bounds.midX - w * anchor.x
+        let y = bounds.midY - h * (1 - anchor.y)
+        image.draw(in: NSRect(x: x, y: y, width: w, height: h),
+                   from: .zero, operation: .sourceOver, fraction: 1)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        anchor = CGPoint(x: max(0, min(1, p.x / max(bounds.width, 1))),
+                         y: max(0, min(1, p.y / max(bounds.height, 1))))
+        let factor: CGFloat = event.scrollingDeltaY > 0 ? 1.12 : 0.89
+        zoom = min(8, max(1, zoom * factor))
+        onZoom?(zoom)
+        needsDisplay = true
+    }
+}
 
 enum XMP {
     static func sidecar(_ url: URL) -> URL {
