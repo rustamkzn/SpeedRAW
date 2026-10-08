@@ -538,16 +538,32 @@ struct ContentView: View {
     }
 
     private func workspace(lib: Library) -> some View {
-        HSplitView {
-            folderColumn(lib: lib).frame(minWidth: 170, idealWidth: 220, maxWidth: 420)
-            HSplitView {
-                photoStripColumn(lib: lib).frame(minWidth: 120, idealWidth: 180, maxWidth: 340)
-                HSplitView {
-                    centerColumn(lib: lib).frame(minWidth: 420, idealWidth: 760)
-                    rightColumn(lib: lib).frame(minWidth: 190, idealWidth: 260, maxWidth: 420)
-                }
-            }
+        // Do not use nested HSplitView here.
+        // On macOS SwiftUI can collapse a nested split column to zero width
+        // when the divider is dragged or when the window is relaid out after
+        // opening a large RAW folder. That was making the folder tree and
+        // thumbnail strip disappear. Keep the three side columns stable first;
+        // column resizing will be reintroduced with explicit width state.
+        HStack(spacing: 0) {
+            folderColumn(lib: lib)
+                .frame(width: 220)
+            
+            Divider()
+            
+            photoStripColumn(lib: lib)
+                .frame(width: 180)
+            
+            Divider()
+            
+            centerColumn(lib: lib)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            
+            Divider()
+            
+            rightColumn(lib: lib)
+                .frame(width: 260)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func folderColumn(lib: Library) -> some View {
