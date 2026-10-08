@@ -1028,8 +1028,10 @@ struct CachedThumb: View {
         .task(id: url) {
             await withCheckedContinuation { continuation in
                 PreviewLoader.load(url: url, size: CGSize(width: 420, height: 420)) { img in
-                    image = img
-                    continuation.resume()
+                    DispatchQueue.main.async {
+                        image = img
+                        continuation.resume()
+                    }
                 }
             }
         }
