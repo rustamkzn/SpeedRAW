@@ -6,6 +6,15 @@ import QuickLookThumbnailing
 import Vision
 import AVFoundation
 
+let APP_VERSION = "0.2.0"
+let APP_BUILD = 18
+
+final class Workspace: ObservableObject, Identifiable {
+    let id = UUID()
+    let lib = Library()
+    @Published var title = "Новая вкладка"
+}
+
 @main
 struct SpeedRAWApp: App {
     var body: some Scene {
@@ -31,6 +40,7 @@ struct PhotoItem: Identifiable, Hashable {
     let url: URL
     var rating: Int = 0
     var label: String = ""
+    var rotation: Int = 0
     var orientation: OrientationFilter = .landscape
     var captureDate: Date?
     var camera: String = ""
@@ -190,12 +200,10 @@ final class Library: ObservableObject {
     }
 
     func rotateCurrent(clockwise: Bool) {
-        guard let item = current else { return }
-        // Store a reversible rotation preference in XMP without touching the original pixels.
-        XMP.setOrientation(for: item.url, clockwise: clockwise)
-        if let i = items.firstIndex(where: { $0.id == item.id }) {
-            items[i].orientation = ImageInfo.orientation(for: item.url)
-        }
+        guard let current, let i = items.firstIndex(where: { $0.id == current.id }) else { return }
+        let step = clockwise ? 90 : 270
+        items[i].rotation = (items[i].rotation + step) % 360
+        XMP.setRotation(for: items[i].url, degrees: items[i].rotation)
         status = clockwise ? "Поворот по часовой" : "Поворот против часовой"
     }
 
@@ -216,488 +224,359 @@ final class Library: ObservableObject {
 
     func rate(_ value: Int) {
         guard let current else { return }
-        guard let i = items.firstIndex(where: { $0.id == current.id }) else { return }
-        XMP.write(rating: value, label: items[i].label, for: items[i].url)
-        items[i].rating = value
-        status = "\\(value)★  •  \\(items[i].url.lastPathComponent)"
-        if autoAdvance { move(1) }
+        setRating(value, for: [current.id], advance: autoAdvance)
     }
 
-    func color(_ label: String) {
-        guard let current else { return }
-        guard let i = items.firstIndex(where: { $0.id == current.id }) else { return }
-        XMP.write(rating: items[i].rating, label: label, for: items[i].url)
-        items[i].label = label
-        status = "\\(label)  •  \\(items[i].url.lastPathComponent)"
-        if autoAdvance { move(1) }
-    }
-
-    func move(_ delta: Int) {
-        guard !filtered.isEmpty else { return }
-        index = min(max(index + delta, 0), filtered.count - 1)
-        zoom = 1
-        updateEyePreview()
-    }
-
-    func toggleSelected() { guard let c=current else{return}; if selectedIDs.contains(c.id){selectedIDs.remove(c.id)}else{selectedIDs.insert(c.id)} }
-    func selectAll() { selectedIDs.formUnion(filtered.map{$0.id}); status="Выбрано \(selectedCount) из \(items.count)" }
-    func toggleCompare() { compareMode = compareItems.count == 2 }
-
-    func updateEyePreview() {
-        guard let current else { eyeCrop = nil; eyeFound = false; return }
-        let token = UUID()
-        eyeToken = token
-        let url = current.url
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result = VisionAnalysis.eyeCrop(for: url)
-            DispatchQueue.main.async {
-                guard self.eyeToken == token else { return }
-                self.eyeCrop = result.crop
-                self.eyeFound = result.found
-                if let i = self.items.firstIndex(where: { $0.id == current.id }) {
-                    self.items[i].peopleCount = result.peopleCount
-                }
-            }
+    func setRating(_ value: Int, for ids: [UUID], advance: Bool = false) {
+        let safe = max(0, min(5, value))
+        for id in ids {
+            guard let i = items.firstIndex(where: { $0.id == id }) else { continue }
+            XMP.write(rating: safe, label: items[i].label, for: items[i].url)
+            items[i].rating = safe
         }
+        status = safe == 0 ? "Рейтинг сброшен" : "Рейтинг (safe)★ установлен"
+        if advance && ids.count == 1 { move(1) }
+    }
+
+    func rateSelected(_ value: Int) {
+        let ids = selectedIDs.isEmpty ? filtered.map(\.id) : Array(selectedIDs)
+        guard !ids.isEmpty else { return }
+        setRating(value, for: ids, advance: false)
+        status = "Рейтинг (value)★ присвоен (ids.count) фото"
     }
 
     func clearRating() {
-        guard let current, let i = items.firstIndex(where: { $0.id == current.id }) else { return }
-        XMP.write(rating: 0, label: items[i].label, for: items[i].url)
-        items[i].rating = 0
+        rateSelected(0)
+    }
+
+    func toggleSelectAll() {
+        let ids = Set(filtered.map(\.id))
+        if ids.isSubset(of: selectedIDs) {
+            selectedIDs.subtract(ids)
+        } else {
+            selectedIDs.formUnion(ids)
+        }
+        status = "Выбрано (selectedIDs.count) фото"
     }
 }
 
 struct ContentView: View {
-    @StateObject private var lib = Library()
-    @State private var showFilterControls = true
+    @State private var workspaces: [Workspace] = [Workspace()]
+    @State private var activeID: UUID?
+    @AppStorage("speedraw.appearance") private var appearanceRaw = "system"
 
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button { lib.openFolder() } label: { Label("Открыть папку", systemImage: "folder") }
-                Button { lib.rotateCurrent(clockwise: false) } label: { Image(systemName: "rotate.left") }
-                Button { lib.rotateCurrent(clockwise: true) } label: { Image(systemName: "rotate.right") }
-                Button { lib.exportCurrentJPEG() } label: { Label("JPEG", systemImage: "arrow.down.doc") }
-                Text(lib.folderName).font(.headline).lineLimit(1)
-                Spacer()
-                Button(lib.compareItems.count == 2 ? "Сравнить" : "Выбрать 2 фото") { lib.toggleCompare() }
-                    .disabled(lib.compareItems.count != 2)
-                Button(lib.selectedIDs.contains(lib.current?.id ?? UUID()) ? "Снять выбор" : "Выбрать") { lib.toggleSelected() }
-                    .disabled(lib.current == nil)
-                Toggle("Автопереход", isOn: $lib.autoAdvance)
-                Button(showFilterControls ? "Скрыть фильтры" : "Фильтры") { showFilterControls.toggle() }
-            }
-            .padding(10)
-
-            Divider()
-
-            VStack(spacing: 0) {
-                // Вкладка проекта как в браузере.
-                HStack(spacing: 0) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "photo.on.rectangle")
-                        Text(lib.folderName)
-                            .font(.system(size: 13, weight: .semibold))
-                            .lineLimit(1)
-                        if !lib.items.isEmpty {
-                            Text("\(lib.items.count)")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .frame(height: 34)
-                    .background(.background)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    Spacer()
-                    Button {
-                        lib.openFolder()
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 12)
-                }
-                .padding(.top, 4)
-                .padding(.horizontal, 8)
-                .background(Color(nsColor: .windowBackgroundColor))
-
-                Divider()
-
-                HStack(spacing: 0) {
-                    // Папки — отдельная узкая панель.
-                    VStack(alignment: .leading, spacing: 0) {
-                        HStack {
-                            Text("ПАПКИ").font(.caption.bold()).foregroundStyle(.secondary)
-                            Spacer()
-                            Button { lib.createFolder() } label: {
-                                Image(systemName: "folder.badge.plus")
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 8).padding(.vertical, 8)
-
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 1) {
-                                ForEach(lib.sidebarRoots) { node in
-                                    FolderRow(node: node, depth: 0, selectedURL: lib.currentFolder) { lib.loadFromSidebar($0) }
-                                }
-                            }
-                            .padding(.vertical, 4)
-                        }
-
-                        if showFilterControls {
-                            Divider()
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("ФИЛЬТРЫ").font(.caption.bold()).foregroundStyle(.secondary)
-                                Picker("Оценка", selection: $lib.ratingFilter) {
-                                    ForEach(RatingFilter.allCases) { Text($0.rawValue).tag($0) }
-                                }.pickerStyle(.menu)
-                                Picker("Цвет", selection: $lib.colorFilter) {
-                                    ForEach(ColorFilter.allCases) { Text($0.rawValue).tag($0) }
-                                }.pickerStyle(.menu)
-                                Picker("Ориентация", selection: $lib.orientationFilter) {
-                                    ForEach(OrientationFilter.allCases) { Text($0.rawValue).tag($0) }
-                                }.pickerStyle(.menu)
-                                Text("\(lib.filtered.count) из \(lib.items.count)")
-                                    .font(.caption2).foregroundStyle(.secondary)
-                            }
-                            .padding(8)
-                        }
-                    }
-                    .frame(width: 220)
-                    .frame(maxHeight: .infinity)
-                    .background(Color(nsColor: .windowBackgroundColor))
-                    .clipped()
-
-                    Divider()
-
-                    // Полноэкранная вертикальная лента кадров.
-                    VStack(spacing: 0) {
-                        HStack {
-                            Text("КАДРЫ").font(.caption.bold()).foregroundStyle(.secondary)
-                            Spacer()
-                            Text("\(lib.index + 1)/\(max(lib.filtered.count, 1))")
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 8).padding(.vertical, 8)
-
-                        NearbyStrip(lib: lib)
-                            .padding(.horizontal, 7)
-                            .frame(maxHeight: .infinity)
-                    }
-                    .frame(width: 150)
-                    .background(Color(nsColor: .controlBackgroundColor))
-                    .clipped()
-
-                    Divider()
-
-                    // Центр: максимально большое фото.
-                    VStack(spacing: 0) {
-                        HStack {
-                            Text(lib.current?.url.lastPathComponent ?? "Speed RAW")
-                                .font(.headline).lineLimit(1)
-                            Spacer()
-                            if !lib.filtered.isEmpty {
-                                Text("\(lib.index + 1) / \(lib.filtered.count)")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-
-                        ZStack {
-                            Color.black
-                            if let item = lib.current {
-                                if lib.compareMode {
-                                    CompareView(lib: lib)
-                                } else {
-                                    ZoomablePreview(url: item.url, zoom: $lib.zoom)
-                                }
-                            } else {
-                                VStack(spacing: 8) {
-                                    Text("Speed RAW").font(.largeTitle.bold())
-                                    Text("Откройте папку с фотографиями").foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .clipped()
-                        .overlay {
-                            if let item = lib.current {
-                                RoundedRectangle(cornerRadius: 0)
-                                    .stroke(lib.selectedIDs.contains(item.id) ? Color.yellow : Color.clear, lineWidth: 4)
-                            }
-                        }
-
-                        if let item = lib.current {
-                            RatingBar(lib: lib, item: item)
-                        }
-
-                        HStack(spacing: 12) {
-                            Text("Выбрано \(lib.selectedCount) из \(lib.items.count) • \(String(format: "%.1f", lib.selectedPercent))%")
-                                .font(.caption.bold())
-                            if let c = lib.current {
-                                Text(c.label.isEmpty ? "Без цвета" : c.label)
-                                Text("Людей: \(c.peopleCount)")
-                            }
-                            Spacer()
-                            Text(lib.status).font(.caption).lineLimit(1)
-                        }
-                        .padding(.horizontal, 10).padding(.vertical, 7)
-                    }
-
-                    Divider()
-
-                    // Справа: голова + данные.
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("ГОЛОВА").font(.caption.bold()).foregroundStyle(.secondary)
-                        HeadPreview(crop: lib.eyeCrop, found: lib.eyeFound)
-                            .frame(maxHeight: 260)
-                        Divider()
-                        if let item = lib.current {
-                            MetadataPanel(item: item)
-                        } else {
-                            Text("Данные появятся после открытия папки")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                    }
-                    .padding(12)
-                    .frame(width: 300)
-                    .frame(maxHeight: .infinity)
-                    .background(.regularMaterial)
-                    .clipped()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .background(.background)
-
-        .onReceive(NotificationCenter.default.publisher(for: .openFolder)) { _ in lib.openFolder() }
-        .onAppear { setupKeyboard() }
+    private var active: Workspace {
+        if let id = activeID, let found = workspaces.first(where: { $0.id == id }) { return found }
+        return workspaces[0]
     }
 
-    private func setupKeyboard() {
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "a" {
-                lib.selectAll(); return nil
-            }
-            if event.keyCode == 49 {
-                lib.zoom = 0 // special value: native 100% in ZoomNSView
-                return nil
-            }
-            guard NSApp.keyWindow?.firstResponder is NSTextView == false else { return event }
+    var body: some View {
+        let lib = active.lib
+        VStack(spacing: 0) {
+            topBar(lib: lib)
+            Divider()
+            tabBar
+            Divider()
+            workspace(lib: lib)
+            Divider()
+            bottomBar(lib: lib)
+        }
+        .onAppear { if activeID == nil { activeID = workspaces[0].id } }
+        .preferredColorScheme(appearanceScheme)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
 
-            switch event.keyCode {
-            case 123: lib.move(-1); return nil
-            case 124: lib.move(1); return nil
-            default: break
-            }
+    private var appearanceScheme: ColorScheme? {
+        appearanceRaw == "dark" ? .dark : appearanceRaw == "light" ? .light : nil
+    }
 
-            if let s = event.charactersIgnoringModifiers {
-                switch s {
-                case "1": lib.rate(1); return nil
-                case "2": lib.rate(2); return nil
-                case "3": lib.rate(3); return nil
-                case "4": lib.rate(4); return nil
-                case "5": lib.rate(5); return nil
-                case "6": lib.color("Red"); return nil
-                case "7": lib.color("Yellow"); return nil
-                case "8": lib.color("Green"); return nil
-                case "9": lib.color("Blue"); return nil
-                case "0": lib.color("Purple"); return nil
-                case "r": lib.clearRating(); return nil
-                case "s": lib.toggleSelected(); return nil
-                default: break
+    private func topBar(lib: Library) -> some View {
+        HStack(spacing: 10) {
+            Button { lib.openFolder() } label: { Label("Открыть папку", systemImage: "folder") }
+            Button { lib.rotateCurrent(clockwise: false) } label: { Image(systemName: "rotate.left") }
+            Button { lib.rotateCurrent(clockwise: true) } label: { Image(systemName: "rotate.right") }
+            Button { lib.exportCurrentJPEG() } label: { Label("JPEG", systemImage: "arrow.down.doc") }
+            Text(lib.folderName).font(.headline).lineLimit(1)
+            Spacer()
+            Toggle("Автопереход", isOn: $lib.autoAdvance)
+            Button { appearanceRaw = appearanceRaw == "dark" ? "light" : "dark" } label: {
+                Image(systemName: appearanceRaw == "dark" ? "sun.max" : "moon")
+            }.buttonStyle(.plain).help("Светлая / тёмная тема")
+            Button(lib.compareItems.count == 2 ? "Сравнить" : "Выбрать 2 фото") { lib.toggleCompare() }
+                .disabled(lib.compareItems.count != 2)
+            Text("v(APP_VERSION) • build (APP_BUILD)").font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(10)
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 4) {
+            ForEach(workspaces) { ws in
+                HStack(spacing: 7) {
+                    Image(systemName: "photo.on.rectangle")
+                    Text(ws.lib.folderName == "Папка не открыта" ? "Новая вкладка" : ws.lib.folderName).lineLimit(1)
+                    if !ws.lib.items.isEmpty { Text("(ws.lib.items.count)").font(.caption2).foregroundStyle(.secondary) }
+                    Button { closeWorkspace(ws) } label: { Image(systemName: "xmark").font(.caption2) }.buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10).frame(height: 32)
+                .background(activeID == ws.id ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .contentShape(Rectangle())
+                .onTapGesture { activeID = ws.id }
+            }
+            Button {
+                let ws = Workspace()
+                workspaces.append(ws)
+                activeID = ws.id
+            } label: { Image(systemName: "plus") }
+            .buttonStyle(.plain).padding(.horizontal, 8)
+            Spacer()
+        }
+        .padding(.horizontal, 8).padding(.vertical, 3)
+    }
+
+    private func closeWorkspace(_ ws: Workspace) {
+        guard workspaces.count > 1 else {
+            ws.lib.items.removeAll()
+            ws.lib.currentFolder = nil
+            ws.lib.folderName = "Папка не открыта"
+            return
+        }
+        let idx = workspaces.firstIndex(where: { $0.id == ws.id })!
+        workspaces.remove(at: idx)
+        if activeID == ws.id { activeID = workspaces[min(idx, workspaces.count - 1)].id }
+    }
+
+    private func workspace(lib: Library) -> some View {
+        HSplitView {
+            folderColumn(lib: lib).frame(minWidth: 170, idealWidth: 220, maxWidth: 420)
+            HSplitView {
+                photoStripColumn(lib: lib).frame(minWidth: 120, idealWidth: 180, maxWidth: 340)
+                HSplitView {
+                    centerColumn(lib: lib).frame(minWidth: 420, idealWidth: 760)
+                    rightColumn(lib: lib).frame(minWidth: 190, idealWidth: 260, maxWidth: 420)
                 }
             }
-            return event
         }
+    }
+
+    private func folderColumn(lib: Library) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("ПАПКИ").font(.caption.bold()).foregroundStyle(.secondary)
+                Spacer()
+                Button { lib.createFolder() } label: { Image(systemName: "folder.badge.plus") }.buttonStyle(.plain)
+            }.padding(8)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    ForEach(lib.sidebarRoots) { node in
+                        FolderRow(node: node, depth: 0, selectedURL: lib.currentFolder) { lib.loadFromSidebar($0) }
+                    }
+                }.padding(.vertical, 4)
+            }
+        }.frame(maxHeight: .infinity).background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func photoStripColumn(lib: Library) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("КАДРЫ").font(.caption.bold()).foregroundStyle(.secondary)
+                Spacer()
+                Text("(lib.filtered.isEmpty ? 0 : lib.index + 1)/(max(lib.filtered.count, 1))")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }.padding(.horizontal, 8).padding(.vertical, 8)
+            NearbyStrip(lib: lib).padding(.horizontal, 6).frame(maxHeight: .infinity)
+        }.background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func centerColumn(lib: Library) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(lib.current?.url.lastPathComponent ?? "Speed RAW").font(.headline).lineLimit(1)
+                Spacer()
+                if !lib.filtered.isEmpty { Text("(lib.index + 1) / (lib.filtered.count)").font(.caption).foregroundStyle(.secondary) }
+            }.padding(.horizontal, 12).padding(.vertical, 7)
+
+            ZStack {
+                Color.black
+                if let item = lib.current {
+                    if lib.compareMode {
+                        CompareView(lib: lib)
+                    } else {
+                        ZoomablePreview(url: item.url, rotation: item.rotation, zoom: $lib.zoom)
+                    }
+                } else {
+                    VStack(spacing: 8) {
+                        Text("Speed RAW").font(.largeTitle.bold())
+                        Text("Откройте папку с фотографиями").foregroundStyle(.secondary)
+                    }.foregroundStyle(.white)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+            .overlay {
+                if let item = lib.current {
+                    RoundedRectangle(cornerRadius: 0)
+                        .stroke(lib.selectedIDs.contains(item.id) ? Color.yellow : Color.clear, lineWidth: 4)
+                }
+            }
+
+            if let item = lib.current { RatingBar(lib: lib, item: item) }
+        }
+        .background(Color.black)
+        .overlay(KeyHandler(lib: lib).frame(width: 1, height: 1).opacity(0.01))
+    }
+
+    private func rightColumn(lib: Library) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("ГОЛОВА").font(.caption.bold()).foregroundStyle(.secondary)
+                HeadPreview(crop: lib.eyeCrop, found: lib.eyeFound).frame(height: 180)
+                if let item = lib.current { MetadataPanel(item: item) }
+            }.padding(10)
+        }.frame(maxHeight: .infinity).background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func bottomBar(lib: Library) -> some View {
+        HStack(spacing: 12) {
+            Text("Рейтинги: (lib.selectedCount) из (lib.items.count) • (String(format: "%.1f", lib.selectedPercent))%")
+                .font(.caption.bold())
+            if let c = lib.current {
+                Text(c.label.isEmpty ? "Без цвета" : c.label)
+                Text("Людей: (c.peopleCount)")
+            }
+            Spacer()
+            Text(lib.status).font(.caption).lineLimit(1)
+        }.padding(.horizontal, 10).padding(.vertical, 7)
     }
 }
 
-struct CachedThumb: View {
-    let url: URL
-    @State private var image: NSImage?
+struct KeyHandler: NSViewRepresentable {
+    let lib: Library
+    func makeNSView(context: Context) -> KeyCatcher {
+        let v = KeyCatcher(); v.lib = lib
+        DispatchQueue.main.async { v.window?.makeFirstResponder(v) }
+        return v
+    }
+    func updateNSView(_ nsView: KeyCatcher, context: Context) {
+        nsView.lib = lib
+        DispatchQueue.main.async { nsView.window?.makeFirstResponder(nsView) }
+    }
+}
 
-    var body: some View {
-        ZStack {
-            Color.black
-            if let image {
-                Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
-            } else {
-                ProgressView().controlSize(.small)
-            }
+final class KeyCatcher: NSView {
+    weak var lib: Library?
+    override var acceptsFirstResponder: Bool { true }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { window?.makeFirstResponder(self) }
+    }
+    override func keyDown(with event: NSEvent) {
+        guard let lib else { super.keyDown(with: event); return }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.command) && event.charactersIgnoringModifiers?.lowercased() == "a" {
+            lib.toggleSelectAll(); return
         }
-        .task(id: url) {
-            await withCheckedContinuation { continuation in
-                PreviewLoader.load(url: url) { img in
-                    DispatchQueue.main.async {
-                        image = img
-                        continuation.resume()
-                    }
-                }
-            }
+        switch event.keyCode {
+        case 49:
+            lib.zoom = lib.zoom == 0 ? 1 : 0
+        case 123:
+            lib.move(-1)
+        case 124:
+            lib.move(1)
+        default:
+            let chars = event.charactersIgnoringModifiers ?? ""
+            if let n = Int(chars), n >= 0 && n <= 5 {
+                if flags.contains(.command) { lib.rateSelected(n) } else { lib.rate(n) }
+            } else { super.keyDown(with: event) }
         }
     }
 }
 
 struct NearbyStrip: View {
     @ObservedObject var lib: Library
-
     var body: some View {
-        GeometryReader { geo in
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 5) {
-                    ForEach(neighborItems, id: \.item.id) { entry in
-                        Button {
-                            lib.index = entry.index
-                            lib.zoom = 1
-                            lib.updateEyePreview()
-                        } label: {
-                            ZStack(alignment: .bottomTrailing) {
-                                CachedThumb(url: entry.item.url)
-                                    .frame(width: max(70, geo.size.width - 4), height: 78)
-                                    .clipped()
-                                    .background(.black)
-
-                                if entry.index == lib.index {
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .stroke(Color.accentColor, lineWidth: 3)
+        ScrollView(.vertical, showsIndicators: true) {
+            LazyVStack(spacing: 6) {
+                ForEach(Array(lib.filtered.enumerated()), id: \.element.id) { entry in
+                    let item = entry.element
+                    Button {
+                        lib.index = entry.offset
+                        lib.zoom = 1
+                        lib.updateEyePreview()
+                    } label: {
+                        ZStack(alignment: .bottom) {
+                            CachedThumb(url: item.url)
+                                .frame(maxWidth: .infinity, minHeight: 86, maxHeight: 112)
+                                .clipped().background(.black)
+                            HStack(spacing: 2) {
+                                ForEach(1...5, id: \.self) { value in
+                                    Image(systemName: value <= item.rating ? "star.fill" : "star")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundStyle(value <= item.rating ? Color.yellow : Color.white.opacity(0.75))
                                 }
                             }
-                        }
-                        .buttonStyle(.plain)
-                        .overlay(alignment: .topLeading) {
-                            if entry.index == lib.index {
-                                Text("ТЕКУЩИЙ")
-                                    .font(.system(size: 8, weight: .bold))
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 2)
-                                    .background(.black.opacity(0.75))
-                                    .foregroundStyle(.white)
+                            .padding(.horizontal, 5).padding(.vertical, 3)
+                            .background(.black.opacity(0.7)).clipShape(Capsule())
+                            .padding(.bottom, 4)
+                            if entry.offset == lib.index {
+                                RoundedRectangle(cornerRadius: 5).stroke(Color.accentColor, lineWidth: 3)
                             }
                         }
                     }
+                    .buttonStyle(.plain)
+                    .overlay(alignment: .topLeading) {
+                        Text("(entry.offset + 1)")
+                            .font(.system(size: 8, weight: .bold))
+                            .padding(.horizontal, 4).padding(.vertical, 2)
+                            .background(.black.opacity(0.75)).foregroundStyle(.white)
+                    }
                 }
-            }
+            }.padding(.vertical, 4)
         }
-    }
-
-    private var neighborItems: [(index: Int, item: PhotoItem)] {
-        guard !lib.filtered.isEmpty else { return [] }
-        let lo = max(0, lib.index - 8)
-        let hi = min(lib.filtered.count - 1, lib.index + 8)
-        return Array(lo...hi).map { ($0, lib.filtered[$0]) }
     }
 }
 
 struct RatingBar: View {
     @ObservedObject var lib: Library
     let item: PhotoItem
-
     var body: some View {
         HStack(spacing: 10) {
-            HStack(spacing: 3) {
-                ForEach(1...5, id: \.self) { value in
-                    Button {
-                        lib.rate(value)
-                    } label: {
-                        Image(systemName: value <= item.rating ? "star.fill" : "star")
-                            .font(.title3)
-                            .foregroundStyle(value <= item.rating ? .yellow : .secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
+            ForEach(1...5, id: \.self) { value in
+                Button { lib.rate(value) } label: {
+                    Image(systemName: value <= item.rating ? "star.fill" : "star")
+                        .font(.title3)
+                        .foregroundStyle(value <= item.rating ? Color.yellow : Color.secondary)
+                }.buttonStyle(.plain)
             }
-
             Divider().frame(height: 20)
-
-            Button("Без оценки") { lib.clearRating() }
-                .buttonStyle(.borderless)
-
+            Button("0 — сбросить") { lib.clearRating() }.buttonStyle(.borderless)
             Spacer()
-
-            Text(item.label.isEmpty ? "Без цвета" : item.label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(.regularMaterial)
-    }
-}
-
-struct HeadPreview: View {
-    let crop: CGImage?
-    let found: Bool
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8).fill(.black)
-            if let crop {
-                Image(decorative: crop, scale: 1)
-                    .resizable()
-                    .scaledToFit()
-                    .padding(6)
-            } else {
-                Text(found ? "Не удалось показать" : "Голова не найдена")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-}
-
-struct CompareView: View {
-    @ObservedObject var lib: Library
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(lib.compareItems) { item in
-                VStack(spacing: 0) {
-                    Text(item.url.lastPathComponent).font(.caption).foregroundStyle(.white).padding(4)
-                    ImageView(url: item.url).frame(maxWidth: .infinity, maxHeight: .infinity).background(.black)
-                }
-            }
-        }.background(.black)
-    }
-}
-
-struct ImageView: View {
-    let url: URL
-    var body: some View {
-        if let image = NSImage(contentsOf: url) {
-            Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
-        } else {
-            Image(systemName: "photo").font(.system(size: 60)).foregroundStyle(.secondary)
-        }
+            Text(item.label.isEmpty ? "Без цвета" : item.label).font(.caption).foregroundStyle(.secondary)
+        }.padding(.horizontal, 12).padding(.vertical, 7).background(.regularMaterial)
     }
 }
 
 struct ZoomablePreview: NSViewRepresentable {
     let url: URL
+    let rotation: Int
     @Binding var zoom: CGFloat
-
     func makeNSView(context: Context) -> ZoomNSView {
-        let view = ZoomNSView()
-        view.load(url: url)
-        return view
+        let view = ZoomNSView(); view.rotation = rotation; view.load(url: url); return view
     }
-
     func updateNSView(_ nsView: ZoomNSView, context: Context) {
-        nsView.onZoom = { value in
-            DispatchQueue.main.async { self.zoom = value }
-        }
+        nsView.onZoom = { value in DispatchQueue.main.async { self.zoom = value } }
+        nsView.rotation = rotation
         nsView.zoom = zoom
         nsView.load(url: url)
+        nsView.needsDisplay = true
     }
 }
 
 final class ZoomNSView: NSView {
     var image: NSImage?
     var zoom: CGFloat = 1
+    var rotation: Int = 0
     var onZoom: ((CGFloat) -> Void)?
     private var anchor = CGPoint(x: 0.5, y: 0.5)
     private var loadedURL: URL?
@@ -708,112 +587,57 @@ final class ZoomNSView: NSView {
     func load(url: URL) {
         guard loadedURL != url else { return }
         loadedURL = url
-        let token = UUID()
-        loadToken = token
-        image = nil
-        anchor = CGPoint(x: 0.5, y: 0.5)
-        needsDisplay = true
-
-        // Use Quick Look's embedded RAW preview first. This is much faster for CR3
-        // than asking NSImage to fully decode the RAW on every frame.
+        let token = UUID(); loadToken = token
+        image = nil; anchor = CGPoint(x: 0.5, y: 0.5); needsDisplay = true
         PreviewLoader.load(url: url) { [weak self] image in
             DispatchQueue.main.async {
                 guard let self, self.loadToken == token else { return }
-                self.image = image
-                self.needsDisplay = true
+                self.image = image; self.needsDisplay = true
             }
         }
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.black.setFill()
-        dirtyRect.fill()
+        NSColor.black.setFill(); dirtyRect.fill()
         guard let image else {
             let text = "Загрузка превью…"
-            let attrs: [NSAttributedString.Key: Any] = [
-                .foregroundColor: NSColor.white.withAlphaComponent(0.65),
-                .font: NSFont.systemFont(ofSize: 13)
-            ]
+            let attrs: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor.white.withAlphaComponent(0.65), .font: NSFont.systemFont(ofSize: 13)]
             (text as NSString).draw(at: NSPoint(x: bounds.midX - 45, y: bounds.midY), withAttributes: attrs)
             return
         }
-
-        let base = AVMakeRect(aspectRatio: image.size, insideRect: bounds)
-        let effectiveZoom: CGFloat = zoom == 0 ? max(base.width > 0 ? image.size.width / base.width : 1,
-                                                    base.height > 0 ? image.size.height / base.height : 1) : zoom
+        let angle = CGFloat((rotation % 360 + 360) % 360) * .pi / 180
+        let rotatedAspect = rotation % 180 == 0 ? image.size : CGSize(width: image.size.height, height: image.size.width)
+        let base = AVMakeRect(aspectRatio: rotatedAspect, insideRect: bounds)
+        let effectiveZoom: CGFloat = zoom == 0
+            ? max(rotatedAspect.width / max(base.width, 1), rotatedAspect.height / max(base.height, 1))
+            : zoom
         let w = base.width * effectiveZoom
         let h = base.height * effectiveZoom
-        let x = bounds.midX - w * anchor.x
-        let y = bounds.midY - h * (1 - anchor.y)
-        image.draw(in: NSRect(x: x, y: y, width: w, height: h),
-                   from: .zero, operation: .sourceOver, fraction: 1)
+        let cx = bounds.midX - w * (anchor.x - 0.5)
+        let cy = bounds.midY + h * (anchor.y - 0.5)
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        ctx.saveGState()
+        ctx.translateBy(x: cx, y: cy)
+        ctx.rotate(by: -angle)
+        image.draw(in: CGRect(x: -w/2, y: -h/2, width: w, height: h), from: .zero, operation: .sourceOver, fraction: 1)
+        ctx.restoreGState()
     }
 
     override func mouseDown(with event: NSEvent) {
-        dragStart = convert(event.locationInWindow, from: nil)
-        dragAnchor = anchor
+        dragStart = convert(event.locationInWindow, from: nil); dragAnchor = anchor
     }
-
     override func mouseDragged(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         let dx = (p.x - dragStart.x) / max(bounds.width, 1)
         let dy = (p.y - dragStart.y) / max(bounds.height, 1)
-        anchor = CGPoint(
-            x: max(0, min(1, dragAnchor.x - dx)),
-            y: max(0, min(1, dragAnchor.y + dy))
-        )
+        anchor = CGPoint(x: max(0, min(1, dragAnchor.x - dx)), y: max(0, min(1, dragAnchor.y + dy)))
         needsDisplay = true
     }
-
-    override func mouseUp(with event: NSEvent) {
-        // Keep the final position; next photo resets it in load().
-    }
-
     override func scrollWheel(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        anchor = CGPoint(x: max(0, min(1, p.x / max(bounds.width, 1))),
-                         y: max(0, min(1, p.y / max(bounds.height, 1))))
+        anchor = CGPoint(x: max(0, min(1, p.x / max(bounds.width, 1))), y: max(0, min(1, p.y / max(bounds.height, 1))))
         let factor: CGFloat = event.scrollingDeltaY > 0 ? 1.12 : 0.89
-        zoom = min(8, max(1, zoom * factor))
-        onZoom?(zoom)
-        needsDisplay = true
-    }
-}
-
-enum PreviewLoader {
-    private static let cache = NSCache<NSURL, NSImage>()
-
-    static func load(url: URL, completion: @escaping (NSImage?) -> Void) {
-        if let cached = cache.object(forKey: url as NSURL) {
-            completion(cached)
-            return
-        }
-
-        let request = QLThumbnailGenerator.Request(
-            fileAt: url,
-            size: CGSize(width: 1800, height: 1800),
-            scale: NSScreen.main?.backingScaleFactor ?? 2,
-            representationTypes: .thumbnail
-        )
-
-        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
-            if let representation {
-                let image = NSImage(
-                    cgImage: representation.cgImage,
-                    size: representation.contentRect.size
-                )
-                cache.setObject(image, forKey: url as NSURL)
-                completion(image)
-                return
-            }
-
-            // Last-resort fallback for formats Quick Look cannot thumbnail.
-            DispatchQueue.global(qos: .userInitiated).async {
-                let image = NSImage(contentsOf: url)
-                if let image { cache.setObject(image, forKey: url as NSURL) }
-                completion(image)
-            }
-        }
+        zoom = min(8, max(1, zoom * factor)); onZoom?(zoom); needsDisplay = true
     }
 }
 
@@ -960,7 +784,7 @@ enum Metadata {
         let flash = (flashValue & 1) != 0 ? "Со вспышкой" : "Без вспышки"
 
         let people = 0
-        return PhotoItem(url: url, rating: XMP.rating(for: url), label: XMP.label(for: url),
+        return PhotoItem(url: url, rating: XMP.rating(for: url), label: XMP.label(for: url), rotation: XMP.rotation(for: url),
                          orientation: h > w ? .portrait : .landscape, captureDate: date,
                          camera: camera, lens: lens, aperture: aperture, shutter: shutter,
                          iso: iso, flash: flash, peopleCount: people)
@@ -1163,40 +987,24 @@ enum XMP {
         }
     }
 
-    static func setOrientation(for url: URL, clockwise: Bool) {
-        // The original pixels remain untouched; rotation is stored in XMP.
-        let value = clockwise ? "6" : "8"
-        let xmpURL = url.deletingPathExtension().appendingPathExtension("xmp")
+    static func setRotation(for url: URL, degrees: Int) {
+        let value = ((degrees % 360) + 360) % 360
+        let xmpURL = sidecar(url)
         var text = (try? String(contentsOf: xmpURL, encoding: .utf8)) ?? ""
         if text.isEmpty || !text.contains("<rdf:Description") {
             text = """
-            <?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
-            <x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:tiff="http://ns.adobe.com/tiff/1.0/">
+            <?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+            <x:xmpmeta xmlns:x="adobe:ns:meta/">
               <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-                <rdf:Description rdf:about="" tiff:Orientation="\(value)"/>
+                <rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rotation="\(value)"/>
               </rdf:RDF>
             </x:xmpmeta>
             <?xpacket end="w"?>
             """
-        } else if text.contains("tiff:Orientation=") {
-            text = text.replacingOccurrences(
-                of: #"tiff:Orientation="\d+""#,
-                with: "tiff:Orientation=\"\(value)\"",
-                options: .regularExpression
-            )
+        } else if text.contains("xmp:Rotation=") {
+            text = text.replacingOccurrences(of: #"xmp:Rotation="\d+""#, with: "xmp:Rotation=\"\(value)\"", options: .regularExpression)
         } else {
-            text = text.replacingOccurrences(
-                of: "<rdf:Description",
-                with: "<rdf:Description tiff:Orientation=\"\(value)\"",
-                options: []
-            )
-            if !text.contains("xmlns:tiff=") {
-                text = text.replacingOccurrences(
-                    of: "<x:xmpmeta",
-                    with: "<x:xmpmeta xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"",
-                    options: []
-                )
-            }
+            text = setAttribute("xmp:Rotation", value: String(value), in: text)
         }
         try? text.write(to: xmpURL, atomically: true, encoding: .utf8)
     }
@@ -1267,4 +1075,12 @@ enum XMP {
 
         try? output.write(to: x, atomically: true, encoding: .utf8)
     }
+    
+    static func rotation(for url: URL) -> Int {
+        guard let text = try? String(contentsOf: sidecar(url), encoding: .utf8),
+              let value = readAttribute("xmp:Rotation", from: text),
+              let rotation = Int(value) else { return 0 }
+        return ((rotation % 360) + 360) % 360
+    }
+
 }
