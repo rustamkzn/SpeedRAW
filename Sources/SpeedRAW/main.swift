@@ -185,7 +185,6 @@ final class Library: ObservableObject {
 
     func rotateCurrent(clockwise: Bool) {
         guard let item = current else { return }
-        let key = clockwise ? "com.apple.Safari" : "com.apple.Safari"
         // Store a reversible rotation preference in XMP without touching the original pixels.
         XMP.setOrientation(for: item.url, clockwise: clockwise)
         if let i = items.firstIndex(where: { $0.id == item.id }) {
@@ -801,17 +800,53 @@ final class Exporter {
     }
 }
 
+enum ImageInfo {
+    static func orientation(for url: URL) -> OrientationFilter {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int,
+              let height = props[kCGImagePropertyPixelHeight] as? Int else {
+            return .landscape
+        }
+        return width >= height ? .landscape : .portrait
+    }
+}
+
 enum XMP {
     static func setOrientation(for url: URL, clockwise: Bool) {
-        // The original RAW remains untouched; rotation is recorded in XMP for compatible viewers.
+        // The original pixels remain untouched; rotation is stored in XMP.
         let value = clockwise ? "6" : "8"
         let xmpURL = url.deletingPathExtension().appendingPathExtension("xmp")
         var text = (try? String(contentsOf: xmpURL, encoding: .utf8)) ?? ""
-        if text.isEmpty { text = "<x:xmpmeta xmlns:x="adobe:ns:meta/"/>" }
-        if text.contains("tiff:Orientation=") {
-            text = text.replacingOccurrences(of: #"tiff:Orientation="[0-9]+""#, with: #"tiff:Orientation="#(value)""#, options: .regularExpression)
+        if text.isEmpty || !text.contains("<rdf:Description") {
+            text = """
+            <?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+            <x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:tiff="http://ns.adobe.com/tiff/1.0/">
+              <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+                <rdf:Description rdf:about="" tiff:Orientation="\(value)"/>
+              </rdf:RDF>
+            </x:xmpmeta>
+            <?xpacket end="w"?>
+            """
+        } else if text.contains("tiff:Orientation=") {
+            text = text.replacingOccurrences(
+                of: #"tiff:Orientation="\d+""#,
+                with: "tiff:Orientation=\"\(value)\"",
+                options: .regularExpression
+            )
         } else {
-            text = text.replacingOccurrences(of: "/>", with: " tiff:Orientation="\(value)"/>")
+            text = text.replacingOccurrences(
+                of: "<rdf:Description",
+                with: "<rdf:Description tiff:Orientation=\"\(value)\"",
+                options: []
+            )
+            if !text.contains("xmlns:tiff=") {
+                text = text.replacingOccurrences(
+                    of: "<x:xmpmeta",
+                    with: "<x:xmpmeta xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"",
+                    options: []
+                )
+            }
         }
         try? text.write(to: xmpURL, atomically: true, encoding: .utf8)
     }
