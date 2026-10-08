@@ -343,6 +343,9 @@ struct ContentView: View {
                     }
                 }
                 .frame(width: 300)
+                .frame(maxHeight: .infinity)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .clipped()
 
                 Divider()
 
@@ -374,6 +377,8 @@ struct ContentView: View {
                             }
                         }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
                     .overlay {
                         if let item = lib.current {
                             RoundedRectangle(cornerRadius: 0)
@@ -422,8 +427,11 @@ struct ContentView: View {
                 }
                 .padding(12)
                 .frame(width: 300)
+                .frame(maxHeight: .infinity)
                 .background(.regularMaterial)
+                .clipped()
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(.background)
         .onReceive(NotificationCenter.default.publisher(for: .openFolder)) { _ in lib.openFolder() }
