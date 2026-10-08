@@ -471,6 +471,8 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        .background(.background)
 
         .onReceive(NotificationCenter.default.publisher(for: .openFolder)) { _ in lib.openFolder() }
         .onAppear { setupKeyboard() }
