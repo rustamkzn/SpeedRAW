@@ -934,6 +934,24 @@ enum XMP {
         return readAttribute("xmp:Label", from: text) ?? ""
     }
 
+    static func setAttribute(_ name: String, value: String, in text: String) -> String {
+        let escaped = NSRegularExpression.escapedPattern(for: name)
+        let pattern = escaped + #"="([^"]*)""#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let range = NSRange(text.startIndex..., in: text)
+        if let match = regex.firstMatch(in: text, range: range),
+           let fullRange = Range(match.range, in: text) {
+            let replacement = "\(name)=\"\(value)\""
+            return text.replacingCharacters(in: fullRange, with: replacement)
+        }
+
+        if let descRange = text.range(of: "<rdf:Description") {
+            let insertion = " \(name)=\"\(value)\""
+            return text.replacingCharacters(in: descRange.upperBound..<descRange.upperBound, with: insertion)
+        }
+        return text
+    }
+
     static func write(rating: Int, label: String, for url: URL) {
         let x = sidecar(url)
         let safeRating = max(0, min(5, rating))
@@ -957,3 +975,5 @@ enum XMP {
         }
 
         try? output.write(to: x, atomically: true, encoding: .utf8)
+    }
+}
