@@ -9,6 +9,7 @@ import AVFoundation
 let APP_VERSION = "0.2.0"
 let APP_BUILD = 18
 
+@MainActor
 final class Workspace: ObservableObject, Identifiable {
     let id = UUID()
     let lib = Library()
@@ -252,6 +253,24 @@ final class Library: ObservableObject {
         status = "Рейтинг \\(value)★ присвоен \\(ids.count) фото"
     }
 
+    func updateEyePreview() {
+        guard let current else { eyeCrop = nil; eyeFound = false; return }
+        let token = UUID()
+        eyeToken = token
+        let url = current.url
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = VisionAnalysis.eyeCrop(for: url)
+            DispatchQueue.main.async {
+                guard self.eyeToken == token else { return }
+                self.eyeCrop = result.crop
+                self.eyeFound = result.found
+                if let i = self.items.firstIndex(where: { $0.id == current.id }) {
+                    self.items[i].peopleCount = result.peopleCount
+                }
+            }
+        }
+    }
+
     func clearRating() {
         rateSelected(0)
     }
@@ -305,13 +324,13 @@ struct ContentView: View {
             Button { lib.exportCurrentJPEG() } label: { Label("JPEG", systemImage: "arrow.down.doc") }
             Text(lib.folderName).font(.headline).lineLimit(1)
             Spacer()
-            Toggle("Автопереход", isOn: $lib.autoAdvance)
+            Toggle("Автопереход", isOn: Binding(get: { lib.autoAdvance }, set: { lib.autoAdvance = $0 }))
             Button { appearanceRaw = appearanceRaw == "dark" ? "light" : "dark" } label: {
                 Image(systemName: appearanceRaw == "dark" ? "sun.max" : "moon")
             }.buttonStyle(.plain).help("Светлая / тёмная тема")
             Button(lib.compareItems.count == 2 ? "Сравнить" : "Выбрать 2 фото") { lib.toggleCompare() }
                 .disabled(lib.compareItems.count != 2)
-            Text("v(APP_VERSION) • build (APP_BUILD)").font(.caption2).foregroundStyle(.secondary)
+            Text("v\\(APP_VERSION) • build \\(APP_BUILD)").font(.caption2).foregroundStyle(.secondary)
         }
         .padding(10)
     }
@@ -322,7 +341,7 @@ struct ContentView: View {
                 HStack(spacing: 7) {
                     Image(systemName: "photo.on.rectangle")
                     Text(ws.lib.folderName == "Папка не открыта" ? "Новая вкладка" : ws.lib.folderName).lineLimit(1)
-                    if !ws.lib.items.isEmpty { Text("(ws.lib.items.count)").font(.caption2).foregroundStyle(.secondary) }
+                    if !ws.lib.items.isEmpty { Text("\\(ws.lib.items.count)").font(.caption2).foregroundStyle(.secondary) }
                     Button { closeWorkspace(ws) } label: { Image(systemName: "xmark").font(.caption2) }.buttonStyle(.plain)
                 }
                 .padding(.horizontal, 10).frame(height: 32)
@@ -389,7 +408,7 @@ struct ContentView: View {
             HStack {
                 Text("КАДРЫ").font(.caption.bold()).foregroundStyle(.secondary)
                 Spacer()
-                Text("(lib.filtered.isEmpty ? 0 : lib.index + 1)/(max(lib.filtered.count, 1))")
+                Text("\\(lib.filtered.isEmpty ? 0 : lib.index + 1)/\\(max(lib.filtered.count, 1))")
                     .font(.caption2).foregroundStyle(.secondary)
             }.padding(.horizontal, 8).padding(.vertical, 8)
             NearbyStrip(lib: lib).padding(.horizontal, 6).frame(maxHeight: .infinity)
@@ -401,7 +420,7 @@ struct ContentView: View {
             HStack {
                 Text(lib.current?.url.lastPathComponent ?? "Speed RAW").font(.headline).lineLimit(1)
                 Spacer()
-                if !lib.filtered.isEmpty { Text("(lib.index + 1) / (lib.filtered.count)").font(.caption).foregroundStyle(.secondary) }
+                if !lib.filtered.isEmpty { Text("\\(lib.index + 1) / \\(lib.filtered.count)").font(.caption).foregroundStyle(.secondary) }
             }.padding(.horizontal, 12).padding(.vertical, 7)
 
             ZStack {
@@ -447,11 +466,11 @@ struct ContentView: View {
 
     private func bottomBar(lib: Library) -> some View {
         HStack(spacing: 12) {
-            Text("Рейтинги: (lib.selectedCount) из (lib.items.count) • (String(format: "%.1f", lib.selectedPercent))%")
+            Text("Рейтинги: \\(lib.selectedCount) из \\(lib.items.count) • \\(String(format: "%.1f", lib.selectedPercent))%")
                 .font(.caption.bold())
             if let c = lib.current {
                 Text(c.label.isEmpty ? "Без цвета" : c.label)
-                Text("Людей: (c.peopleCount)")
+                Text("Людей: \\(c.peopleCount)")
             }
             Spacer()
             Text(lib.status).font(.caption).lineLimit(1)
@@ -506,7 +525,7 @@ struct NearbyStrip: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
             LazyVStack(spacing: 6) {
-                ForEach(lib.filtered.indices, id: \.self) { idx in
+                ForEach(Array(lib.filtered.indices), id: \.self) { idx in
                     let item = lib.filtered[idx]
                     Button {
                         lib.index = idx
