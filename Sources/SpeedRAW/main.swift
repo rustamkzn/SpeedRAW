@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import ImageIO
+import QuickLookThumbnailing
 import Vision
 import AVFoundation
 
@@ -460,15 +461,18 @@ struct ZoomablePreview: NSViewRepresentable {
     let url: URL
     @Binding var zoom: CGFloat
 
-    func makeNSView(context: Context) -> ZoomNSView { ZoomNSView() }
+    func makeNSView(context: Context) -> ZoomNSView {
+        let view = ZoomNSView()
+        view.load(url: url)
+        return view
+    }
 
     func updateNSView(_ nsView: ZoomNSView, context: Context) {
-        nsView.image = NSImage(contentsOf: url)
-        nsView.zoom = zoom
         nsView.onZoom = { value in
             DispatchQueue.main.async { self.zoom = value }
         }
-        nsView.needsDisplay = true
+        nsView.zoom = zoom
+        nsView.load(url: url)
     }
 }
 
@@ -477,11 +481,40 @@ final class ZoomNSView: NSView {
     var zoom: CGFloat = 1
     var onZoom: ((CGFloat) -> Void)?
     private var anchor = CGPoint(x: 0.5, y: 0.5)
+    private var loadedURL: URL?
+    private var loadToken = UUID()
+
+    func load(url: URL) {
+        guard loadedURL != url else { return }
+        loadedURL = url
+        let token = UUID()
+        loadToken = token
+        image = nil
+        needsDisplay = true
+
+        // CR3 files often do not decode through NSImage(contentsOf:).
+        // Prefer Quick Look's embedded RAW preview, then fall back to ImageIO/NSImage.
+        PreviewLoader.load(url: url) { [weak self] image in
+            DispatchQueue.main.async {
+                guard let self, self.loadToken == token else { return }
+                self.image = image
+                self.needsDisplay = true
+            }
+        }
+    }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard let image else { NSColor.black.setFill(); dirtyRect.fill(); return }
         NSColor.black.setFill()
         dirtyRect.fill()
+        guard let image else {
+            let text = "Загрузка превью…"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .foregroundColor: NSColor.white.withAlphaComponent(0.65),
+                .font: NSFont.systemFont(ofSize: 13)
+            ]
+            (text as NSString).draw(at: NSPoint(x: bounds.midX - 45, y: bounds.midY), withAttributes: attrs)
+            return
+        }
 
         let base = AVMakeRect(aspectRatio: image.size, insideRect: bounds)
         let w = base.width * zoom
@@ -500,6 +533,32 @@ final class ZoomNSView: NSView {
         zoom = min(8, max(1, zoom * factor))
         onZoom?(zoom)
         needsDisplay = true
+    }
+}
+
+enum PreviewLoader {
+    static func load(url: URL, completion: @escaping (NSImage?) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let image = NSImage(contentsOf: url) {
+                completion(image)
+                return
+            }
+
+            let size = CGSize(width: 2600, height: 2600)
+            let request = QLThumbnailGenerator.Request(
+                fileAt: url,
+                size: size,
+                scale: NSScreen.main?.backingScaleFactor ?? 2,
+                representationTypes: .thumbnail
+            )
+            QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, error in
+                if let representation {
+                    completion(NSImage(cgImage: representation.cgImage, size: representation.contentRect.size))
+                } else {
+                    completion(nil)
+                }
+            }
+        }
     }
 }
 
@@ -898,22 +957,3 @@ enum XMP {
         }
 
         try? output.write(to: x, atomically: true, encoding: .utf8)
-    }
-
-    static func setAttribute(_ name: String, value: String, in text: String) -> String {
-        let escapedName = NSRegularExpression.escapedPattern(for: name)
-        let pattern = escapedName + #"="[^"]*""#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
-              let range = Range(match.range, in: text) else {
-            guard let desc = text.range(of: "<rdf:Description"),
-                  let end = text[desc.lowerBound...].firstIndex(of: ">") else { return text }
-            var copy = text
-            copy.insert(contentsOf: " \(name)=\"\(value)\"", at: end)
-            return copy
-        }
-        var copy = text
-        copy.replaceSubrange(range, with: "\(name)=\"\(value)\"")
-        return copy
-    }
-}
